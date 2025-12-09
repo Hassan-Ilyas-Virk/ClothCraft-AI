@@ -160,6 +160,20 @@ function App() {
                 doodleBlob
             );
 
+            // If blend strength is 0, skip Stable Diffusion and return composited result
+            if (blendStrength === 0) {
+                console.log('   ⏭️ Skipping Stable Diffusion (blend strength = 0)');
+                console.log('   ✅ Returning Pix2Pix result only');
+
+                // Convert blob to data URL for preview
+                const reader = new FileReader();
+                return new Promise((resolve, reject) => {
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(compositedImageBlob);
+                });
+            }
+
             // Step 3: Create mask from doodle
             console.log('   Step 3: Creating mask');
             const maskBlob = await createMaskFromDoodle(doodleBlob, blendStrength);

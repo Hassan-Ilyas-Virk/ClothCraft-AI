@@ -81,7 +81,9 @@ const ClothifyModal = ({
                                     onChange={(e) => setBlendStrength(parseFloat(e.target.value))}
                                 />
                                 <div className="clothify-slider-value">
-                                    Higher = more change, softer edges
+                                    {blendStrength === 0
+                                        ? '0% = Pix2Pix only (no Stable Diffusion)'
+                                        : 'Higher = more change, softer edges'}
                                 </div>
                             </div>
                         </div>

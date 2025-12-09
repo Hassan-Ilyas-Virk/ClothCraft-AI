@@ -453,6 +453,63 @@ export async function refinePattern(imageBase64, prompt, strength = 0.6) {
 }
 
 /**
+ * Convert RGB to HSL
+ * @param {number} r - Red (0-255)
+ * @param {number} g - Green (0-255)
+ * @param {number} b - Blue (0-255)
+ * @returns {object} - {h: 0-360, s: 0-100, l: 0-100}
+ */
+function rgbToHsl(r, g, b) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h, s, l = (max + min) / 2;
+
+  if (max === min) {
+    h = s = 0; // achromatic
+  } else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+
+    switch (max) {
+      case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+      case g: h = ((b - r) / d + 2) / 6; break;
+      case b: h = ((r - g) / d + 4) / 6; break;
+    }
+  }
+
+  return {
+    h: Math.round(h * 360),
+    s: Math.round(s * 100),
+    l: Math.round(l * 100)
+  };
+}
+
+/**
+ * Calculate color quality score based on saturation and vibrancy
+ * @param {number} r - Red (0-255)
+ * @param {number} g - Green (0-255)
+ * @param {number} b - Blue (0-255)
+ * @returns {number} - Quality score (0-100)
+ */
+function getColorQuality(r, g, b) {
+  const hsl = rgbToHsl(r, g, b);
+  
+  // Prefer saturated colors (high saturation)
+  const saturationScore = hsl.s;
+  
+  // Prefer colors that are not too dark or too light (mid-range lightness)
+  // Peak quality at 50% lightness, decrease towards 0% and 100%
+  const lightnessScore = 100 - Math.abs(50 - hsl.l) * 2;
+  
+  // Combined score (weighted average)
+  return (saturationScore * 0.7) + (lightnessScore * 0.3);
+}
+
+/**
  * Extract dominant colors from an image
  * @param {HTMLImageElement} image - The source image
  * @param {number} count - Number of colors to extract
@@ -473,27 +530,62 @@ export function extractDominantColors(image, count = 4) {
   const imageData = ctx.getImageData(0, 0, width, height).data;
   const colorMap = {};
   
-  // Quantize colors (round to nearest 10 to group similar colors)
+  // Quantize colors (round to nearest 20 to group similar colors)
   const quantization = 20;
   
+  // Thresholds for filtering
+  const MIN_SATURATION = 25; // Filter out colors with saturation < 25%
+  const MIN_LIGHTNESS = 15;  // Filter out very dark colors (< 15%)
+  const MAX_LIGHTNESS = 85;  // Filter out very light colors (> 85%)
+  
   for (let i = 0; i < imageData.length; i += 4) {
-    const r = Math.round(imageData[i] / quantization) * quantization;
-    const g = Math.round(imageData[i + 1] / quantization) * quantization;
-    const b = Math.round(imageData[i + 2] / quantization) * quantization;
+    const r = imageData[i];
+    const g = imageData[i + 1];
+    const b = imageData[i + 2];
     const a = imageData[i + 3];
     
     // Skip transparent pixels
     if (a < 128) continue;
     
-    const rgb = `${r},${g},${b}`;
+    // Convert to HSL to check saturation and lightness
+    const hsl = rgbToHsl(r, g, b);
+    
+    // Filter out low saturation colors (grays, pale colors)
+    if (hsl.s < MIN_SATURATION) continue;
+    
+    // Filter out very light colors (near-white, pale yellows)
+    if (hsl.l > MAX_LIGHTNESS) continue;
+    
+    // Filter out very dark colors (near-black)
+    if (hsl.l < MIN_LIGHTNESS) continue;
+    
+    // Quantize after filtering
+    const rQuant = Math.round(r / quantization) * quantization;
+    const gQuant = Math.round(g / quantization) * quantization;
+    const bQuant = Math.round(b / quantization) * quantization;
+    
+    const rgb = `${rQuant},${gQuant},${bQuant}`;
     colorMap[rgb] = (colorMap[rgb] || 0) + 1;
   }
   
-  // Sort by frequency
+  // Sort by combined score: frequency + quality
   const sortedColors = Object.entries(colorMap)
-    .sort(([, a], [, b]) => b - a)
+    .map(([rgb, frequency]) => {
+      const [r, g, b] = rgb.split(',').map(Number);
+      const quality = getColorQuality(r, g, b);
+      
+      // Combined score: normalize frequency and add quality
+      const maxFreq = Math.max(...Object.values(colorMap));
+      const normalizedFreq = (frequency / maxFreq) * 100;
+      
+      // Weight: 60% frequency, 40% quality
+      const score = (normalizedFreq * 0.6) + (quality * 0.4);
+      
+      return { rgb, frequency, quality, score };
+    })
+    .sort((a, b) => b.score - a.score)
     .slice(0, count)
-    .map(([rgb]) => {
+    .map(({ rgb }) => {
       const [r, g, b] = rgb.split(',').map(Number);
       return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
     });
