@@ -1,13 +1,33 @@
 .toolbar {
-  width: 60px;
-  background: linear-gradient(180deg, #f8f9ff 0%, #f0f2ff 100%);
-  border-right: 1px solid #e0e4ff;
+  position: fixed;
+  left: 20px;
+  top: 80px;
+  width: 64px;
+  /* Glassmorphism */
+  background: rgba(245, 240, 255, 0.75); /* Light purple tint */
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 12px 0;
-  gap: 4px;
-  box-shadow: 2px 0 8px rgba(139, 92, 246, 0.05);
+  padding: 16px 0;
+  gap: 8px;
+  /* Glow & Shadow */
+  box-shadow: 
+    0 8px 32px rgba(31, 38, 135, 0.15),
+    0 0 0 1px rgba(255, 255, 255, 0.6) inset,
+    0 0 15px rgba(139, 92, 246, 0.3); /* Purple outer glow */
+  z-index: 1000;
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.toolbar:hover {
+  box-shadow: 
+    0 12px 40px rgba(31, 38, 135, 0.2),
+    0 0 0 1px rgba(255, 255, 255, 0.8) inset,
+    0 0 20px rgba(139, 92, 246, 0.4); /* Stronger glow on hover */
 }
 
 .toolbar-tool {
@@ -31,9 +51,12 @@
 }
 
 .toolbar-tool.active {
-  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
-  color: white;
-  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+  background: rgba(139, 92, 246, 0.15);
+  color: #7c3aed;
+  box-shadow:
+    0 0 15px rgba(124, 58, 237, 0.2),
+    0 0 0 1px rgba(139, 92, 246, 0.3);
+  transform: translateY(-1px);
 }
 
 .toolbar-tool:disabled {

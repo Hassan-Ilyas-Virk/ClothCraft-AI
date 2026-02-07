@@ -111,15 +111,13 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
   overflow: auto;
-  background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
+  background-color: #ffffff;
+  background-image: radial-gradient(#d1d5db 1px, transparent 1px);
+  background-size: 20px 20px;
 }
 
 .drawing-canvas-container {
-  background: white;
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
   overflow: hidden;
 }
 
@@ -152,7 +150,9 @@ body {
 .empty-state-icon {
   font-size: 80px;
   margin-bottom: 24px;
-  opacity: 0.3;
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
 
 .empty-state-text {

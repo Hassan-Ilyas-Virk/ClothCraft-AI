@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { Plus, Minimize2, Maximize2 } from 'lucide-react';
 import LayerItem from './LayerItem';
 import './LayersPanel.css';
 
@@ -14,55 +15,65 @@ const LayersPanel = ({
     onPatternMaker,
     onUpdateLayer
 }) => {
+    const [isMinimized, setIsMinimized] = useState(false);
+
     const activeLayer = layers.find(l => l.id === activeLayerId);
     const referenceLayer = layers.find(l => l.type === 'reference');
     const drawingLayers = layers.filter(l => l.type !== 'reference');
 
+
     return (
-        <div className="layers-panel">
+        <div className={`layers-panel ${isMinimized ? 'minimized' : ''}`}>
             <div className="layers-panel-header">
                 <div className="layers-panel-title">Layers</div>
-                <button
-                    className="add-layer-btn"
-                    onClick={onAddLayer}
-                    title="Add new layer"
-                >
-                    +
-                </button>
+                <div className="layers-panel-controls">
+                    <button
+                        className="panel-control-btn"
+                        onClick={() => setIsMinimized(!isMinimized)}
+                        title={isMinimized ? "Maximize" : "Minimize"}
+                    >
+                        {isMinimized ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
+                    </button>
+                    <button
+                        className="panel-control-btn add-layer-btn"
+                        onClick={onAddLayer}
+                        title="Add new layer"
+                    >
+                        <Plus size={18} strokeWidth={2.5} />
+                    </button>
+                </div>
             </div>
 
             {/* Layer Controls (Opacity & Blend Mode) */}
-            <div className="layer-controls" style={{ padding: '0.75rem', borderBottom: '1px solid #e5e7eb', backgroundColor: '#f9fafb' }}>
-                <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <label style={{ fontSize: '12px', fontWeight: 500, color: '#4b5563' }}>Opacity</label>
-                    <span style={{ fontSize: '11px', color: '#6b7280' }}>{activeLayer ? Math.round(activeLayer.opacity * 100) : 100}%</span>
+            {/* Layer Controls (Opacity & Blend Mode) */}
+            <div className="layer-controls-section">
+                <div className="control-row">
+                    <label className="control-label">Opacity</label>
+                    <span className="control-value">{activeLayer ? Math.round(activeLayer.opacity * 100) : 100}%</span>
                 </div>
-                <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value={activeLayer ? activeLayer.opacity : 1}
-                    onChange={(e) => activeLayer && onUpdateLayer(activeLayer.id, { opacity: parseFloat(e.target.value) })}
-                    disabled={!activeLayer}
-                    style={{ width: '100%', marginBottom: '0.75rem', accentColor: '#8b5cf6' }}
-                />
+                <div className="slider-container">
+                    <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={activeLayer ? activeLayer.opacity : 1}
+                        onChange={(e) => activeLayer && onUpdateLayer(activeLayer.id, { opacity: parseFloat(e.target.value) })}
+                        disabled={!activeLayer}
+                        className="opacity-slider"
+                        style={{
+                            background: `linear-gradient(to right, #8b5cf6 0%, #8b5cf6 ${activeLayer ? activeLayer.opacity * 100 : 100}%, white ${activeLayer ? activeLayer.opacity * 100 : 100}%, white 100%)`
+                        }}
+                    />
+                </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <label style={{ fontSize: '12px', fontWeight: 500, color: '#4b5563' }}>Blend Mode</label>
+                <div className="control-row">
+                    <label className="control-label">Blend Mode</label>
                     <select
                         value={activeLayer?.blendMode || 'source-over'}
                         onChange={(e) => activeLayer && onUpdateLayer(activeLayer.id, { blendMode: e.target.value })}
                         disabled={!activeLayer}
-                        style={{
-                            fontSize: '12px',
-                            padding: '2px 4px',
-                            borderRadius: '4px',
-                            border: '1px solid #d1d5db',
-                            backgroundColor: 'white',
-                            color: '#374151',
-                            outline: 'none'
-                        }}
+                        className="blend-mode-select"
                     >
                         <option value="source-over">Normal</option>
                         <option value="multiply">Multiply</option>
@@ -114,7 +125,7 @@ const LayersPanel = ({
 
                         {/* Reference Layer (Pinned to Bottom) */}
                         {referenceLayer && (
-                            <div style={{ borderTop: '2px solid #e5e7eb', marginTop: 'auto' }}>
+                            <div style={{ marginTop: 'auto' }}>
                                 <LayerItem
                                     key={referenceLayer.id}
                                     layer={referenceLayer}

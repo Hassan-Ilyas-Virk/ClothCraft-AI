@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette } from 'lucide-react';
 import './LayersPanel.css';
 
 const LayerItem = ({
@@ -52,7 +53,7 @@ const LayerItem = ({
                         <img src={layer.thumbnail} alt={layer.name} />
                     ) : (
                         <span className="layer-thumbnail-placeholder">
-                            {layer.type === 'reference' ? '🖼️' : '🎨'}
+                            {layer.type === 'reference' ? <ImageIcon size={24} /> : <Palette size={24} />}
                         </span>
                     )}
                 </div>
@@ -71,7 +72,7 @@ const LayerItem = ({
                         }}
                         title={layer.visible ? 'Hide layer' : 'Show layer'}
                     >
-                        {layer.visible ? '👁️' : '👁️‍🗨️'}
+                        {layer.visible ? <Eye size={16} /> : <EyeOff size={16} />}
                     </button>
 
                     <button
@@ -82,7 +83,7 @@ const LayerItem = ({
                         }}
                         title={layer.locked ? 'Unlock layer' : 'Lock layer'}
                     >
-                        {layer.locked ? '🔒' : '🔓'}
+                        {layer.locked ? <Lock size={16} /> : <Unlock size={16} />}
                     </button>
 
                     {layer.type !== 'reference' && (
@@ -94,7 +95,7 @@ const LayerItem = ({
                             }}
                             title="Delete layer"
                         >
-                            🗑️
+                            <Trash2 size={16} />
                         </button>
                     )}
                 </div>
@@ -110,24 +111,24 @@ const LayerItem = ({
                     }}
                 >
                     <div className="layer-context-menu-item clothify" onClick={handleClothify}>
-                        ✨ Clothify
+                        <Sparkles size={16} /> Clothify
                     </div>
                     <div className="layer-context-menu-divider" />
                     <div className="layer-context-menu-item" onClick={() => setShowContextMenu(false)}>
-                        📝 Rename
+                        <Edit size={16} /> Rename
                     </div>
                     <div className="layer-context-menu-item" onClick={() => setShowContextMenu(false)}>
-                        📋 Duplicate
+                        <Copy size={16} /> Duplicate
                     </div>
                     <div className="layer-context-menu-item" onClick={() => {
                         setShowContextMenu(false);
                         onPatternMaker && onPatternMaker(layer);
                     }}>
-                        🎨 Pattern Maker
+                        <Grid3x3 size={16} /> Pattern Maker
                     </div>
                     <div className="layer-context-menu-divider" />
                     <div className="layer-context-menu-item" onClick={handleDelete}>
-                        🗑️ Delete
+                        <Trash2 size={16} /> Delete
                     </div>
                 </div>
             )}

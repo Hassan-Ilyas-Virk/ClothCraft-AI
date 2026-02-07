@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { Upload, Sparkles, X, ImagePlus } from 'lucide-react';
 // Force re-compile
 import './App.css';
 import Toolbar from './components/Toolbar';
@@ -278,7 +279,10 @@ function App() {
         <div className="app">
             {/* Top Header */}
             <header className="app-header">
-                <h1>✨ Clothify Editor</h1>
+                <h1>
+                    <Sparkles size={24} style={{ display: 'inline', marginRight: '8px', verticalAlign: 'middle' }} />
+                    Clothify Editor
+                </h1>
                 <div className="header-controls">
                     <input
                         type="file"
@@ -289,7 +293,8 @@ function App() {
                         style={{ display: 'none' }}
                     />
                     <label htmlFor="imageUpload" className="upload-btn">
-                        📁 Upload Reference
+                        <Upload size={16} style={{ display: 'inline', marginRight: '6px', verticalAlign: 'middle' }} />
+                        Upload Reference
                     </label>
                 </div>
             </header>
@@ -297,7 +302,9 @@ function App() {
             {error && (
                 <div className="error-banner">
                     ⚠️ {error}
-                    <button onClick={() => setError(null)}>✕</button>
+                    <button onClick={() => setError(null)}>
+                        <X size={18} />
+                    </button>
                 </div>
             )}
 
@@ -336,12 +343,15 @@ function App() {
                         />
                     ) : (
                         <div className="empty-state">
-                            <div className="empty-state-icon">🎨</div>
+                            <div className="empty-state-icon">
+                                <ImagePlus size={80} strokeWidth={1.5} color="#d1d5db" />
+                            </div>
                             <div className="empty-state-text">
                                 Upload a reference image to get started
                             </div>
                             <label htmlFor="imageUpload" className="empty-state-btn">
-                                📁 Upload Image
+                                <Upload size={16} style={{ display: 'inline', marginRight: '6px', verticalAlign: 'middle' }} />
+                                Upload Image
                             </label>
                         </div>
                     )}
