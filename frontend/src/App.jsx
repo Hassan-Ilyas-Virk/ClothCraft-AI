@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Sparkles, X, ImagePlus } from 'lucide-react';
+import { Upload, Sparkles, X, ImagePlus, SlidersHorizontal } from 'lucide-react';
 // Force re-compile
 import './App.css';
 import Toolbar from './components/Toolbar';
@@ -8,6 +8,7 @@ import MultiLayerCanvas from './components/MultiLayerCanvas';
 import ClothifyModal from './components/ClothifyModal';
 import PatternMakerModal from './components/PatternMakerModal';
 import MoodboardModal from './components/MoodboardModal';
+import StylebendModal from './components/StylebendModal';
 import BrushControls from './components/BrushControls';
 import { useLayerManager } from './hooks/useLayerManager';
 import {
@@ -39,6 +40,7 @@ function App() {
     const [clothifyLayer, setClothifyLayer] = useState(null);
     const [patternLayer, setPatternLayer] = useState(null);
     const [showMoodboard, setShowMoodboard] = useState(false);
+    const [showStylebend, setShowStylebend] = useState(false);
     const [moodboardColors, setMoodboardColors] = useState([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState(null);
@@ -275,6 +277,29 @@ function App() {
         setShowMoodboard(false);
     };
 
+    const handleApplyStylebend = async (resultUrl) => {
+        try {
+            // Fetch the image to get a blob
+            const res = await fetch(resultUrl);
+            const blob = await res.blob();
+            const objectUrl = URL.createObjectURL(blob);
+
+            // Create a new layer for the blended image
+            const newLayer = addLayer('drawing', `Blended Style`);
+
+            // Update the layer with the object URL
+            updateLayer(newLayer.id, {
+                canvasData: objectUrl,
+                thumbnail: objectUrl
+            });
+
+            console.log('✅ Stylebend result applied to new layer');
+        } catch (err) {
+            console.error('Error applying Stylebend result:', err);
+            setError('Failed to apply Stylebend image to canvas');
+        }
+    };
+
     return (
         <div className="app">
             {/* Top Header */}
@@ -369,6 +394,7 @@ function App() {
                     onClothify={handleClothify}
                     onPatternMaker={handlePatternMaker}
                     onUpdateLayer={updateLayer}
+                    onStylebend={() => setShowStylebend(true)}
                 />
             </div >
 
@@ -402,6 +428,16 @@ function App() {
                     <MoodboardModal
                         onClose={handleCloseMoodboard}
                         onApply={handleApplyMoodboard}
+                    />
+                )
+            }
+
+            {/* Stylebend Modal */}
+            {
+                showStylebend && (
+                    <StylebendModal
+                        onClose={() => setShowStylebend(false)}
+                        onApply={handleApplyStylebend}
                     />
                 )
             }

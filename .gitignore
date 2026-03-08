@@ -53,9 +53,18 @@ Thumbs.db
 # Logs
 *.log
 logs/
+output.log
 
+# Model files (too large for git — download separately)
+model/*.safetensors
+model/*.pth
+model/*.ckpt
+model/*.pkl
 
-# Models
-models/*.safetensors
-models/*.pth
-models/*.ckpt
+# rembg AI model cache (downloaded automatically at runtime)
+u2net/
+
+# Stylebend vendor / generated files
+stylebend/vendor/
+stylebend/__pycache__/
+stylebend/scripts/__pycache__/

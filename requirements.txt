@@ -9,3 +9,8 @@ transformers==4.36.0
 accelerate==0.25.0
 safetensors==0.4.1
 
+
+# Stylebend integration
+lpips==0.1.4
+opencv-python
+scikit-image

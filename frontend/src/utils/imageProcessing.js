@@ -37,24 +37,24 @@ export async function createMaskFromDoodle(originalDoodleBlob, featherAmount = 0
     try {
       // Load original doodle as image
       const img = await blobToImage(originalDoodleBlob);
-      
+
       // Create canvas
       const canvas = document.createElement('canvas');
       canvas.width = img.width;
       canvas.height = img.height;
       const ctx = canvas.getContext('2d');
-      
+
       // Draw the original doodle
       ctx.drawImage(img, 0, 0);
-      
+
       // Get pixel data
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const pixels = imageData.data;
-      
+
       // Create binary mask: WHITE where doodle exists, BLACK elsewhere
       for (let i = 0; i < pixels.length; i += 4) {
         const alpha = pixels[i + 3]; // Alpha channel
-        
+
         // If pixel has alpha (doodle was drawn here)
         if (alpha > 10) {
           // White = enhance/inpaint this area
@@ -70,32 +70,32 @@ export async function createMaskFromDoodle(originalDoodleBlob, featherAmount = 0
           pixels[i + 3] = 255;
         }
       }
-      
+
       ctx.putImageData(imageData, 0, 0);
-      
+
       // Apply feathering/blur for soft edges
       if (featherAmount > 0) {
         const blurRadius = Math.max(5, Math.round(featherAmount * 50)); // 5-50px blur
-        
+
         // Create temporary canvas for blurring
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = canvas.width;
         tempCanvas.height = canvas.height;
         const tempCtx = tempCanvas.getContext('2d');
-        
+
         // Apply CSS blur filter
         tempCtx.filter = `blur(${blurRadius}px)`;
         tempCtx.drawImage(canvas, 0, 0);
-        
+
         // Copy blurred result back
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(tempCanvas, 0, 0);
-        
+
         console.log(`🎭 Created feathered mask (blur: ${blurRadius}px)`);
       } else {
         console.log('🎭 Created binary mask (no feathering)');
       }
-      
+
       // Convert to blob
       canvas.toBlob(resolve, 'image/png');
     } catch (error) {
@@ -118,25 +118,25 @@ export async function compositeTranslatedDoodleOnReference(referenceBlob, transl
       const referenceImg = await blobToImage(referenceBlob);
       const translatedImg = await blobToImage(translatedDoodleBlob);
       const originalDoodleImg = await blobToImage(originalDoodleBlob);
-      
+
       // Create canvas with reference size
       const canvas = document.createElement('canvas');
       canvas.width = referenceImg.width;
       canvas.height = referenceImg.height;
       const ctx = canvas.getContext('2d');
-      
+
       // Draw reference image first
       ctx.drawImage(referenceImg, 0, 0);
-      
+
       console.log('📐 Compositing translated doodle onto reference...');
-      
+
       // Scale translated doodle to match reference size
       const scaledTranslatedCanvas = document.createElement('canvas');
       scaledTranslatedCanvas.width = referenceImg.width;
       scaledTranslatedCanvas.height = referenceImg.height;
       const scaledCtx = scaledTranslatedCanvas.getContext('2d');
       scaledCtx.drawImage(translatedImg, 0, 0, referenceImg.width, referenceImg.height);
-      
+
       // Get original doodle pixels to use as mask
       const doodleCanvas = document.createElement('canvas');
       doodleCanvas.width = referenceImg.width;
@@ -144,35 +144,35 @@ export async function compositeTranslatedDoodleOnReference(referenceBlob, transl
       const doodleCtx = doodleCanvas.getContext('2d');
       doodleCtx.drawImage(originalDoodleImg, 0, 0, referenceImg.width, referenceImg.height);
       const doodleData = doodleCtx.getImageData(0, 0, referenceImg.width, referenceImg.height);
-      
+
       // Get translated doodle pixels
       const translatedData = scaledCtx.getImageData(0, 0, referenceImg.width, referenceImg.height);
-      
+
       // Composite: Only draw translated doodle where original doodle exists
       // BUT handle black doodles specially
       const compositeData = ctx.getImageData(0, 0, referenceImg.width, referenceImg.height);
-      
+
       let pixelsComposited = 0;
       let blackBackgroundSkipped = 0;
-      
+
       for (let i = 0; i < doodleData.data.length; i += 4) {
         const originalAlpha = doodleData.data[i + 3];
-        
+
         if (originalAlpha > 10) {
           // Original doodle exists at this location
-          
+
           // Check if original doodle was black/dark
           const origR = doodleData.data[i];
           const origG = doodleData.data[i + 1];
           const origB = doodleData.data[i + 2];
           const originalWasBlack = origR < 50 && origG < 50 && origB < 50;
-          
+
           // Get translated pixel
           const transR = translatedData.data[i];
           const transG = translatedData.data[i + 1];
           const transB = translatedData.data[i + 2];
           const translatedIsBlack = transR < 20 && transG < 20 && transB < 20;
-          
+
           // Decision logic:
           // - If original doodle WAS black → keep translated pixel even if black (it's content)
           // - If original doodle was NOT black → skip very black pixels (they're background from Pix2Pix)
@@ -191,13 +191,13 @@ export async function compositeTranslatedDoodleOnReference(referenceBlob, transl
         }
         // Otherwise keep reference image (already drawn)
       }
-      
+
       ctx.putImageData(compositeData, 0, 0);
-      
+
       console.log('✓ Composited: Reference + Translated Doodle');
       console.log(`  - Doodle pixels used: ${pixelsComposited}`);
       console.log(`  - Black background pixels skipped: ${blackBackgroundSkipped}`);
-      
+
       // Convert to blob
       canvas.toBlob(resolve, 'image/png');
     } catch (error) {
@@ -240,6 +240,58 @@ export async function inpaintWithStableDiffusion(referenceBlob, maskBlob, prompt
   } catch (error) {
     console.error('Error inpainting with Stable Diffusion:', error);
     throw new Error('Failed to inpaint with Stable Diffusion');
+  }
+}
+
+/**
+ * Blend two fashion images using StyleGAN-Human
+ * @param {Blob} image1Blob - First image
+ * @param {Blob} image2Blob - Second image
+ * @param {number} alpha - Blending strength (0.0 to 1.0)
+ * @param {boolean} outpaint1 - Whether to outpaint image 1 to full body first
+ * @param {boolean} outpaint2 - Whether to outpaint image 2 to full body first
+ * @returns {Promise<Array>} - Array of blended frame data URLs
+ */
+export async function blendStyles(image1Blob, image2Blob, alpha, outpaint1 = false, outpaint2 = false) {
+  const formData = new FormData();
+  formData.append('image1', image1Blob, 'image1.jpg');
+  formData.append('image2', image2Blob, 'image2.jpg');
+  formData.append('alpha', alpha.toString());
+  formData.append('outpaint1', outpaint1 ? 'true' : 'false');
+  formData.append('outpaint2', outpaint2 ? 'true' : 'false');
+
+  console.log(`👗 Blending styles with alpha: ${alpha}, outpaint1: ${outpaint1}, outpaint2: ${outpaint2}`);
+
+  // 15-minute timeout — inversion with 700 steps can take several minutes
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
+
+  try {
+    const response = await fetch('http://127.0.0.1:5000/blend-styles', {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      let errorMsg = 'Failed to blend styles';
+      try {
+        const errorData = await response.json();
+        errorMsg = errorData.error || errorMsg;
+      } catch (e) { }
+      throw new Error(errorMsg);
+    }
+
+    const data = await response.json();
+    return data.frames;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Request timed out after 15 minutes. Try with fewer steps or a smaller image.');
+    }
+    console.error('Error blending styles:', error);
+    throw new Error(error.message || 'Failed to blend styles');
   }
 }
 
@@ -418,11 +470,11 @@ export function loadImageToCanvas(image, canvas) {
  */
 export async function refinePattern(imageBase64, prompt, strength = 0.6) {
   const formData = new FormData();
-  
+
   // Convert base64 to blob
   const response = await fetch(imageBase64);
   const blob = await response.blob();
-  
+
   formData.append('image', blob, 'pattern.png');
   formData.append('prompt', prompt);
   formData.append('strength', strength.toString());
@@ -438,7 +490,7 @@ export async function refinePattern(imageBase64, prompt, strength = 0.6) {
     }
 
     const resultBlob = await res.blob();
-    
+
     // Convert blob back to base64 for frontend display
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -497,14 +549,14 @@ function rgbToHsl(r, g, b) {
  */
 function getColorQuality(r, g, b) {
   const hsl = rgbToHsl(r, g, b);
-  
+
   // Prefer saturated colors (high saturation)
   const saturationScore = hsl.s;
-  
+
   // Prefer colors that are not too dark or too light (mid-range lightness)
   // Peak quality at 50% lightness, decrease towards 0% and 100%
   const lightnessScore = 100 - Math.abs(50 - hsl.l) * 2;
-  
+
   // Combined score (weighted average)
   return (saturationScore * 0.7) + (lightnessScore * 0.3);
 }
@@ -518,69 +570,69 @@ function getColorQuality(r, g, b) {
 export function extractDominantColors(image, count = 4) {
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
-  
+
   // Resize for faster processing
   const width = 100;
   const height = (image.height / image.width) * width;
   canvas.width = width;
   canvas.height = height;
-  
+
   ctx.drawImage(image, 0, 0, width, height);
-  
+
   const imageData = ctx.getImageData(0, 0, width, height).data;
   const colorMap = {};
-  
+
   // Quantize colors (round to nearest 20 to group similar colors)
   const quantization = 20;
-  
+
   // Thresholds for filtering
   const MIN_SATURATION = 25; // Filter out colors with saturation < 25%
   const MIN_LIGHTNESS = 15;  // Filter out very dark colors (< 15%)
   const MAX_LIGHTNESS = 85;  // Filter out very light colors (> 85%)
-  
+
   for (let i = 0; i < imageData.length; i += 4) {
     const r = imageData[i];
     const g = imageData[i + 1];
     const b = imageData[i + 2];
     const a = imageData[i + 3];
-    
+
     // Skip transparent pixels
     if (a < 128) continue;
-    
+
     // Convert to HSL to check saturation and lightness
     const hsl = rgbToHsl(r, g, b);
-    
+
     // Filter out low saturation colors (grays, pale colors)
     if (hsl.s < MIN_SATURATION) continue;
-    
+
     // Filter out very light colors (near-white, pale yellows)
     if (hsl.l > MAX_LIGHTNESS) continue;
-    
+
     // Filter out very dark colors (near-black)
     if (hsl.l < MIN_LIGHTNESS) continue;
-    
+
     // Quantize after filtering
     const rQuant = Math.round(r / quantization) * quantization;
     const gQuant = Math.round(g / quantization) * quantization;
     const bQuant = Math.round(b / quantization) * quantization;
-    
+
     const rgb = `${rQuant},${gQuant},${bQuant}`;
     colorMap[rgb] = (colorMap[rgb] || 0) + 1;
   }
-  
+
   // Sort by combined score: frequency + quality
   const sortedColors = Object.entries(colorMap)
     .map(([rgb, frequency]) => {
       const [r, g, b] = rgb.split(',').map(Number);
       const quality = getColorQuality(r, g, b);
-      
+
       // Combined score: normalize frequency and add quality
       const maxFreq = Math.max(...Object.values(colorMap));
       const normalizedFreq = (frequency / maxFreq) * 100;
-      
+
       // Weight: 60% frequency, 40% quality
       const score = (normalizedFreq * 0.6) + (quality * 0.4);
-      
+
       return { rgb, frequency, quality, score };
     })
     .sort((a, b) => b.score - a.score)
@@ -589,6 +641,6 @@ export function extractDominantColors(image, count = 4) {
       const [r, g, b] = rgb.split(',').map(Number);
       return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
     });
-    
+
   return sortedColors;
 }
