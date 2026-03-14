@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import ReactDOM from 'react-dom';
 import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette } from 'lucide-react';
 import './LayersPanel.css';
 
@@ -34,10 +35,16 @@ const LayerItem = ({
     };
 
     React.useEffect(() => {
-        const handleClickOutside = () => setShowContextMenu(false);
+        const handleClickOutside = (e) => {
+            // Close unless the click is inside the context menu itself
+            if (!e.target.closest('.layer-context-menu')) {
+                setShowContextMenu(false);
+            }
+        };
         if (showContextMenu) {
-            document.addEventListener('click', handleClickOutside);
-            return () => document.removeEventListener('click', handleClickOutside);
+            // Use mousedown so it fires before click handlers and closes reliably
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => document.removeEventListener('mousedown', handleClickOutside);
         }
     }, [showContextMenu]);
 
@@ -48,6 +55,18 @@ const LayerItem = ({
                 onClick={() => onSelect(layer.id)}
                 onContextMenu={handleContextMenu}
             >
+                {layer.type !== 'reference' && (
+                    <button
+                        className="layer-clothify-btn"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onClothify(layer);
+                        }}
+                        title="Clothify this layer"
+                    >
+                        <Sparkles size={14} />
+                    </button>
+                )}
                 <div className="layer-thumbnail">
                     {layer.thumbnail ? (
                         <img src={layer.thumbnail} alt={layer.name} />
@@ -101,7 +120,7 @@ const LayerItem = ({
                 </div>
             </div>
 
-            {showContextMenu && (
+            {showContextMenu && ReactDOM.createPortal(
                 <div
                     className="layer-context-menu"
                     style={{
@@ -130,7 +149,8 @@ const LayerItem = ({
                     <div className="layer-context-menu-item" onClick={handleDelete}>
                         <Trash2 size={16} /> Delete
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </>
     );

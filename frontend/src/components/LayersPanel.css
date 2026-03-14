@@ -273,6 +273,28 @@
   flex-shrink: 0;
 }
 
+.layer-clothify-btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: #8b5cf6;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: all 0.2s ease;
+}
+
+.layer-clothify-btn:hover {
+  background: rgba(139, 92, 246, 0.15);
+  opacity: 1;
+  transform: scale(1.1);
+}
+
 .layer-control-btn {
   width: 28px;
   height: 28px;
@@ -298,19 +320,24 @@
   color: #8b5cf6;
 }
 
+.layer-control-btn.clothify:hover {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8b5cf6;
+}
+
 .layer-control-btn.delete:hover {
   background: rgba(239, 68, 68, 0.1);
   color: #ef4444;
 }
 
 .layer-context-menu {
-  position: absolute;
+  position: fixed;
   background: white;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
   padding: 4px;
-  z-index: 2000;
+  z-index: 9999;
   min-width: 160px;
 }
 

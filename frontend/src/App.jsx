@@ -1,5 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Sparkles, X, ImagePlus, SlidersHorizontal } from 'lucide-react';
+import { Upload, Sparkles, X, ImagePlus, SlidersHorizontal, ChevronLeft, PenLine } from 'lucide-react';
+import { getUser, login as authLogin, signup as authSignup, logout as authLogout } from './services/auth';
+import * as projectService from './services/projects';
+import LoginPage from './pages/LoginPage';
+import HomePage from './pages/HomePage';
 // Force re-compile
 import './App.css';
 import Toolbar from './components/Toolbar';
@@ -21,6 +25,17 @@ import {
 
 function App() {
     const canvasRef = useRef(null);
+
+    // ── Routing / auth / project state ─────────────────────────────────
+    const [currentView,    setCurrentView]    = useState('loading'); // 'loading'|'login'|'home'|'canvas'
+    const [currentUser,    setCurrentUser]    = useState(null);
+    const [currentProject, setCurrentProject] = useState(null);
+    const [userProjects,   setUserProjects]   = useState([]);
+    const [canvasName,     setCanvasName]     = useState('Untitled Design');
+    const [nameEditing,    setNameEditing]    = useState(false);
+    const canvasNameInputRef                  = useRef(null);
+    // ───────────────────────────────────────────────────────────────────
+
     const {
         layers,
         activeLayerId,
@@ -31,6 +46,7 @@ function App() {
         toggleLayerVisibility,
         toggleLayerLock,
         getReferenceLayer,
+        loadAllLayers,
     } = useLayerManager();
 
     const [activeTool, setActiveTool] = useState('brush');
@@ -76,6 +92,112 @@ function App() {
             window.removeEventListener('keyup', handleKeyUp);
         };
     }, [activeTool, previousTool, clothifyLayer]);
+
+    // ── Auth check on mount ────────────────────────────────────────────
+    useEffect(() => {
+        const user = getUser();
+        if (user) { setCurrentUser(user); setCurrentView('home'); }
+        else      { setCurrentView('login'); }
+    }, []);
+
+    // Refresh project list when arriving on the home view
+    useEffect(() => {
+        if (currentView === 'home' && currentUser) {
+            setUserProjects(projectService.getProjects(currentUser.id));
+        }
+    }, [currentView, currentUser]);
+
+    // Restore layers when a project is opened (key off project id so it only fires on project change)
+    useEffect(() => {
+        if (!currentProject) return;
+        setCanvasName(currentProject.name || 'Untitled Design');
+        if (currentProject.layersSnapshot) {
+            try {
+                const { layers: sl, activeLayerId: sa, canvasWidth: cw, canvasHeight: ch } = JSON.parse(currentProject.layersSnapshot);
+                loadAllLayers(sl, sa);
+                if (cw && ch) canvasRef.current?.setCanvasSize(cw, ch);
+            } catch { loadAllLayers([], null); }
+        } else {
+            loadAllLayers([], null);
+        }
+    }, [currentProject?.id]);
+
+    // Auto-save layers 3 s after the last change while on the canvas view
+    useEffect(() => {
+        if (currentView !== 'canvas' || !currentProject) return;
+        const tid = setTimeout(() => _saveProject(canvasName), 3000);
+        return () => clearTimeout(tid);
+    }, [layers]);
+
+    // Focus the canvas name input when editing starts
+    useEffect(() => {
+        if (nameEditing && canvasNameInputRef.current) {
+            canvasNameInputRef.current.select();
+        }
+    }, [nameEditing]);
+    // ──────────────────────────────────────────────────────────────────
+
+    // ── Auth handlers ─────────────────────────────────────────────────
+    const handleLogin = async (email, password) => {
+        const user = authLogin(email, password);   // throws on failure
+        setCurrentUser(user);
+        setCurrentView('home');
+    };
+    const handleSignup = async (email, password, name) => {
+        const user = authSignup(email, password, name);
+        setCurrentUser(user);
+        setCurrentView('home');
+    };
+    const handleLogout = () => {
+        authLogout();
+        setCurrentUser(null);
+        setCurrentProject(null);
+        loadAllLayers([], null);
+        setCurrentView('login');
+    };
+
+    // ── Project handlers ──────────────────────────────────────────────
+    /** Internal: persist current state to storage */
+    const _saveProject = (nameOverride) => {
+        if (!currentProject) return;
+        const name = (nameOverride || canvasName || '').trim() || 'Untitled Design';
+        const thumbnail = layers.find(l => l.thumbnail)?.thumbnail || null;
+        const { width: canvasWidth, height: canvasHeight } = canvasRef.current?.getCanvasSize() ?? { width: 1024, height: 1024 };
+        projectService.saveProject(currentProject.id, { name, thumbnail, layers, activeLayerId, canvasWidth, canvasHeight });
+    };
+
+    const handleNewProject = () => {
+        const proj = projectService.createProject(currentUser.id, 'Untitled Design');
+        setCurrentProject(proj);
+        setCanvasName(proj.name);
+        loadAllLayers([], null);
+        setCurrentView('canvas');
+    };
+    const handleOpenProject = (proj) => {
+        setCurrentProject(proj);
+        setCurrentView('canvas');
+    };
+    const handleDeleteProject = (projectId) => {
+        projectService.deleteProject(projectId);
+        setUserProjects(projectService.getProjects(currentUser.id));
+    };
+    const handleRenameProject = (projectId, newName) => {
+        projectService.renameProject(projectId, newName);
+        setUserProjects(projectService.getProjects(currentUser.id));
+    };
+    const handleBackToHome = () => {
+        _saveProject();
+        setCurrentView('home');
+    };
+
+    // ── Canvas name handlers ──────────────────────────────────────────
+    const handleNameCommit = () => {
+        const trimmed = (canvasName || '').trim() || 'Untitled Design';
+        setCanvasName(trimmed);
+        setNameEditing(false);
+        _saveProject(trimmed);
+    };
+    // ──────────────────────────────────────────────────────────────────
 
     // Handle reference image upload
     const handleImageUpload = (event) => {
@@ -300,14 +422,66 @@ function App() {
         }
     };
 
+    // ── Conditional routing renders ────────────────────────────────────
+    if (currentView === 'loading') return null;
+    if (currentView === 'login') return (
+        <LoginPage onLogin={handleLogin} onSignup={handleSignup} />
+    );
+    if (currentView === 'home') return (
+        <HomePage
+            user={currentUser}
+            projects={userProjects}
+            onNewProject={handleNewProject}
+            onOpenProject={handleOpenProject}
+            onDeleteProject={handleDeleteProject}
+            onRenameProject={handleRenameProject}
+            onLogout={handleLogout}
+        />
+    );
+    // ── Canvas view ────────────────────────────────────────────────────
     return (
         <div className="app">
             {/* Top Header */}
             <header className="app-header">
-                <h1>
-                    <Sparkles size={24} style={{ display: 'inline', marginRight: '8px', verticalAlign: 'middle' }} />
-                    Clothify Editor
-                </h1>
+                {/* Left: back + brand */}
+                <div className="app-header-left">
+                    <button className="app-back-btn" onClick={handleBackToHome} title="Back to Home">
+                        <ChevronLeft size={17} />
+                        <span>Home</span>
+                    </button>
+                    <div className="app-header-logo">
+                        <Sparkles size={16} strokeWidth={1.5} />
+                    </div>
+                </div>
+
+                {/* Center: editable project name */}
+                <div className="app-name-area">
+                    {nameEditing ? (
+                        <input
+                            ref={canvasNameInputRef}
+                            className="app-name-input"
+                            value={canvasName}
+                            onChange={e => setCanvasName(e.target.value)}
+                            onBlur={handleNameCommit}
+                            onKeyDown={e => {
+                                if (e.key === 'Enter')  { e.target.blur(); }
+                                if (e.key === 'Escape') { setNameEditing(false); }
+                                e.stopPropagation();
+                            }}
+                        />
+                    ) : (
+                        <button
+                            className="app-name-display"
+                            onClick={() => setNameEditing(true)}
+                            title="Click to rename"
+                        >
+                            {canvasName}
+                            <PenLine size={12} />
+                        </button>
+                    )}
+                </div>
+
+                {/* Right: upload */}
                 <div className="header-controls">
                     <input
                         type="file"

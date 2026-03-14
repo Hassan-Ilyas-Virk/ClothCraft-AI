@@ -21,6 +21,58 @@ const MultiLayerCanvas = forwardRef(({
     // Transform state
     const [transformState, setTransformState] = useState(null); // { mode: 'move' | 'resize' | 'pan', ... }
 
+    // Overlay canvas for shape/selection previews
+    const overlayCanvasRef = useRef(null);
+    // In-progress mouse operation: shape drag, selection drag, lasso draw
+    const operationRef = useRef(null);
+    // Committed selection: { type:'rect', x, y, w, h } | { type:'lasso', points:[] }
+    const selectionRef = useRef(null);
+    // Floating selection during transform (extract → drag → commit)
+    const floatingSelRef = useRef(null);
+    // Text tool input state — canvasFontSize is kept in sync with box height
+    const [textInput, setTextInput] = useState({ visible: false, x: 0, y: 0, value: '', canvasX: 0, canvasY: 0, width: 200, height: 60, canvasFontSize: 24 });
+    const textInputFieldRef = useRef(null);
+    // Resize drag tracking for the text overlay box
+    const textResizeRef = useRef({ active: false });
+    // Whether a committed selection exists (shown as a persistent canvas badge)
+    const [selectionActive, setSelectionActive] = useState(false);
+    // Whether Space is held for temporary pan
+    const spaceHeld = useRef(false);
+
+    // Imperatively focus the text input after it mounts (autoFocus is unreliable inside mousedown handlers)
+    useEffect(() => {
+        if (textInput.visible && textInputFieldRef.current) {
+            const id = setTimeout(() => textInputFieldRef.current?.focus(), 20);
+            return () => clearTimeout(id);
+        }
+    }, [textInput.visible]);
+
+    // Global mouse handlers for dragging the text-box resize handle
+    useEffect(() => {
+        const onMove = (e) => {
+            const r = textResizeRef.current;
+            if (!r.active) return;
+            const newWidth  = Math.max(60, r.startWidth  + (e.clientX - r.startX));
+            const newHeight = Math.max(24, r.startHeight + (e.clientY - r.startY));
+            const newScreenFont  = Math.round(newHeight * 0.5);
+            const newCanvasFont  = Math.max(6, Math.round(newScreenFont / (r.viewScale || 1) / (r.layerScale || 1)));
+            setTextInput(prev => ({ ...prev, width: newWidth, height: newHeight, canvasFontSize: newCanvasFont }));
+        };
+        const onUp = () => {
+            if (textResizeRef.current.active) {
+                textResizeRef.current.active = false;
+                // Return focus to textarea after a resize so the user can keep typing
+                setTimeout(() => textInputFieldRef.current?.focus(), 0);
+            }
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup',   onUp);
+        return () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup',   onUp);
+        };
+    }, []);
+
     // Initialize canvases for all layers
     useEffect(() => {
         layers.forEach(layer => {
@@ -47,7 +99,101 @@ const MultiLayerCanvas = forwardRef(({
         return () => container.removeEventListener('wheel', handleWheel);
     }, []);
 
-    // Draw layer content when layer data or transform changes
+    // Escape = commit float at current position (keeps move+resize); or clear selection
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            // Space = temporary pan (skip when typing in a text field)
+            if (e.key === ' ') {
+                const tag = document.activeElement?.tagName;
+                if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+                    e.preventDefault();
+                    spaceHeld.current = true;
+                }
+            }
+            if (e.key === 'Escape') {
+                if (floatingSelRef.current) {
+                    commitFloat();
+                    setTransformState(null);
+                } else {
+                    selectionRef.current = null;
+                    setSelectionActive(false);
+                    operationRef.current = null;
+                    const overlay = overlayCanvasRef.current;
+                    if (overlay) overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
+                }
+            } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectionRef.current && activeLayerId) {
+                const canvasEl = canvasRefs.current[activeLayerId]?.current;
+                if (!canvasEl) return;
+                const sel = selectionRef.current;
+                const ctx = canvasEl.getContext('2d');
+                ctx.save();
+                ctx.globalCompositeOperation = 'destination-out';
+                if (sel.type === 'rect') {
+                    ctx.fillRect(sel.x, sel.y, sel.w, sel.h);
+                } else if (sel.type === 'lasso' && sel.points.length > 2) {
+                    ctx.beginPath();
+                    ctx.moveTo(sel.points[0].x, sel.points[0].y);
+                    for (let i = 1; i < sel.points.length; i++) ctx.lineTo(sel.points[i].x, sel.points[i].y);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+                ctx.restore();
+                updateLayerThumbnail(activeLayerId);
+            }
+        };
+        const handleKeyUp = (e) => {
+            if (e.key === ' ') {
+                spaceHeld.current = false;
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup',   handleKeyUp);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup',   handleKeyUp);
+        };
+    }, [activeLayerId]);
+
+    // Clear overlay + selection atomics on tool/layer switch
+    useEffect(() => {
+        operationRef.current = null;
+        if (activeTool === 'select' || activeTool === 'lasso') {
+            selectionRef.current = null;
+            setSelectionActive(false);
+        }
+    }, [activeTool, activeLayerId]);
+
+    // Unified overlay: always redraws the correct overlay content when anything relevant changes.
+    useEffect(() => {
+        const overlay = overlayCanvasRef.current;
+        if (!overlay) return;
+
+        // Float manages its own overlay — re-render it and bail out BEFORE clearing.
+        // Clearing first would wipe float pixels that were drawn imperatively during drag.
+        if (floatingSelRef.current) {
+            renderFloatOnOverlay();
+            return;
+        }
+
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        if (activeTool === 'transform' && activeLayerId) {
+            if (selectionRef.current) {
+                // Selection active: marching ants + corner handles so user can drag to float+resize
+                drawSelectionWithHandles(selectionRef.current);
+            } else {
+                // No selection: whole-layer bounding box + handles
+                const activeLayer = layers.find(l => l.id === activeLayerId);
+                if (activeLayer) drawTransformHandlesOnOverlay(ctx, activeLayer);
+            }
+        } else if (activeTool !== 'select' && activeTool !== 'lasso' && selectionRef.current) {
+            drawSelectionOnOverlay(selectionRef.current);
+        }
+    }, [activeTool, activeLayerId, layers, canvasSize, transformState]);
+
+    // Draw layer content when layer data changes — never draws handles here so the canvas
+    // pixels are always clean (handles live on the overlay canvas instead).
     useEffect(() => {
         layers.forEach(layer => {
             const canvasRef = canvasRefs.current[layer.id];
@@ -56,42 +202,44 @@ const MultiLayerCanvas = forwardRef(({
                 const img = new Image();
                 img.onload = () => {
                     ctx.clearRect(0, 0, canvasSize.width, canvasSize.height);
-                    ctx.globalCompositeOperation = 'source-over'; // Reset composite operation
+                    ctx.globalCompositeOperation = 'source-over';
                     ctx.drawImage(img, 0, 0);
-
-                    if (layer.id === activeLayerId && activeTool === 'transform') {
-                        drawTransformHandles(ctx, layer);
-                    }
                 };
                 img.src = layer.canvasData;
             }
         });
-    }, [layers, canvasSize, activeLayerId, activeTool]);
+    }, [layers, canvasSize]);
 
-    const drawTransformHandles = (ctx, layer) => {
+    // Draw transform handles on the OVERLAY canvas in wrapper-space coordinates.
+    // bounds are in layer-local pixels; convert using the layer's CSS transform.
+    const drawTransformHandlesOnOverlay = (ctx, layer) => {
         const bounds = layer.bounds || { x: 0, y: 0, width: canvasSize.width, height: canvasSize.height };
-        const transform = layer.transform || { scale: 1 };
+        const t = layer.transform || { x: 0, y: 0, scale: 1 };
+
+        // Convert layer-local bounds → wrapper (overlay) coordinate space
+        const x = t.x + bounds.x * t.scale;
+        const y = t.y + bounds.y * t.scale;
+        const w = bounds.width * t.scale;
+        const h = bounds.height * t.scale;
+        const handleSize = 10;
 
         ctx.save();
+        ctx.setLineDash([]);
         ctx.strokeStyle = '#8b5cf6';
-        ctx.lineWidth = 2 / transform.scale;
-        ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x, y, w, h);
 
-        const handleSize = 10 / transform.scale;
         ctx.fillStyle = 'white';
-
         const corners = [
-            { x: bounds.x, y: bounds.y },
-            { x: bounds.x + bounds.width, y: bounds.y },
-            { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
-            { x: bounds.x, y: bounds.y + bounds.height }
+            { x: x,     y: y     },
+            { x: x + w, y: y     },
+            { x: x + w, y: y + h },
+            { x: x,     y: y + h },
         ];
-
         corners.forEach(c => {
             ctx.fillRect(c.x - handleSize / 2, c.y - handleSize / 2, handleSize, handleSize);
             ctx.strokeRect(c.x - handleSize / 2, c.y - handleSize / 2, handleSize, handleSize);
         });
-
         ctx.restore();
     };
 
@@ -178,7 +326,376 @@ const MultiLayerCanvas = forwardRef(({
         };
     };
 
+    // ── Overlay helpers ──────────────────────────────────────────────────────
+
+    const clearOverlay = () => {
+        const overlay = overlayCanvasRef.current;
+        if (!overlay) return;
+        overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
+    };
+
+    const drawOverlayPreview = () => {
+        const overlay = overlayCanvasRef.current;
+        if (!overlay || !operationRef.current) return;
+        const ctx = overlay.getContext('2d');
+        const op = operationRef.current;
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        ctx.save();
+        if (op.tool === 'select') {
+            const x = Math.min(op.startX, op.endX);
+            const y = Math.min(op.startY, op.endY);
+            const w = Math.abs(op.endX - op.startX);
+            const h = Math.abs(op.endY - op.startY);
+            ctx.setLineDash([6, 3]);
+            ctx.strokeStyle = '#8b5cf6';
+            ctx.lineWidth = 1.5;
+            ctx.fillStyle = 'rgba(139, 92, 246, 0.06)';
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeRect(x, y, w, h);
+        } else if (op.tool === 'lasso') {
+            if (op.points.length < 2) { ctx.restore(); return; }
+            ctx.setLineDash([6, 3]);
+            ctx.strokeStyle = '#8b5cf6';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(op.points[0].x, op.points[0].y);
+            for (let i = 1; i < op.points.length; i++) ctx.lineTo(op.points[i].x, op.points[i].y);
+            ctx.stroke();
+        } else if (op.tool === 'shape-rect') {
+            const x = Math.min(op.startX, op.endX);
+            const y = Math.min(op.startY, op.endY);
+            const w = Math.abs(op.endX - op.startX);
+            const h = Math.abs(op.endY - op.startY);
+            ctx.setLineDash([]);
+            ctx.strokeStyle = brushColor;
+            ctx.lineWidth = brushSize;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.strokeRect(x, y, w, h);
+        } else if (op.tool === 'shape-circle') {
+            const cx = (op.startX + op.endX) / 2;
+            const cy = (op.startY + op.endY) / 2;
+            const rx = Math.abs(op.endX - op.startX) / 2;
+            const ry = Math.abs(op.endY - op.startY) / 2;
+            if (rx > 0 && ry > 0) {
+                ctx.setLineDash([]);
+                ctx.strokeStyle = brushColor;
+                ctx.lineWidth = brushSize;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
+    };
+
+    const drawSelectionOnOverlay = (sel) => {
+        const overlay = overlayCanvasRef.current;
+        if (!overlay) return;
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        if (!sel) return;
+        ctx.save();
+        ctx.setLineDash([6, 3]);
+        ctx.strokeStyle = '#8b5cf6';
+        ctx.lineWidth = 1.5;
+        ctx.fillStyle = 'rgba(139, 92, 246, 0.06)';
+        if (sel.type === 'rect') {
+            ctx.fillRect(sel.x, sel.y, sel.w, sel.h);
+            ctx.strokeRect(sel.x, sel.y, sel.w, sel.h);
+        } else if (sel.type === 'lasso' && sel.points.length > 2) {
+            ctx.beginPath();
+            ctx.moveTo(sel.points[0].x, sel.points[0].y);
+            for (let i = 1; i < sel.points.length; i++) ctx.lineTo(sel.points[i].x, sel.points[i].y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
+        ctx.restore();
+    };
+
+    // Marching ants + corner handles for a selection (transform tool, before floating)
+    const drawSelectionWithHandles = (sel) => {
+        const overlay = overlayCanvasRef.current;
+        if (!overlay || !sel) return;
+        const ctx = overlay.getContext('2d');
+        ctx.save();
+        ctx.setLineDash([6, 3]);
+        ctx.strokeStyle = '#8b5cf6';
+        ctx.lineWidth = 1.5;
+        ctx.fillStyle = 'rgba(139, 92, 246, 0.06)';
+        if (sel.type === 'rect') {
+            ctx.fillRect(sel.x, sel.y, sel.w, sel.h);
+            ctx.strokeRect(sel.x, sel.y, sel.w, sel.h);
+        } else if (sel.type === 'lasso' && sel.points.length > 2) {
+            ctx.beginPath();
+            ctx.moveTo(sel.points[0].x, sel.points[0].y);
+            for (let i = 1; i < sel.points.length; i++) ctx.lineTo(sel.points[i].x, sel.points[i].y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
+        ctx.restore();
+        const bounds = getSelBounds(sel);
+        if (!bounds) return;
+        const handleSize = 9;
+        const corners = [
+            { x: bounds.x,           y: bounds.y           },
+            { x: bounds.x + bounds.w, y: bounds.y           },
+            { x: bounds.x + bounds.w, y: bounds.y + bounds.h },
+            { x: bounds.x,           y: bounds.y + bounds.h },
+        ];
+        ctx.save();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = '#8b5cf6';
+        ctx.fillStyle = 'white';
+        ctx.lineWidth = 1.5;
+        corners.forEach(c => {
+            ctx.fillRect(c.x - handleSize / 2, c.y - handleSize / 2, handleSize, handleSize);
+            ctx.strokeRect(c.x - handleSize / 2, c.y - handleSize / 2, handleSize, handleSize);
+        });
+        ctx.restore();
+    };
+
+    // Returns the axis-aligned bounding box of any selection shape (canvas pixel coords)
+    const getSelBounds = (sel) => {
+        if (!sel) return null;
+        if (sel.type === 'rect') return { x: sel.x, y: sel.y, w: sel.w, h: sel.h };
+        if (sel.type === 'lasso' && sel.points.length > 1) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const p of sel.points) {
+                if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+            }
+            return { x: Math.floor(minX), y: Math.floor(minY), w: Math.ceil(maxX - minX), h: Math.ceil(maxY - minY) };
+        }
+        return null;
+    };
+
+    // Render the in-flight floating selection on the overlay canvas (with scale + corner handles)
+    const renderFloatOnOverlay = () => {
+        const float = floatingSelRef.current;
+        const overlay = overlayCanvasRef.current;
+        if (!float || !overlay) return;
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        const bounds = getSelBounds(float.sel);
+        const sx = float.sx ?? 1;
+        const sy = float.sy ?? 1;
+        // Draw float pixels scaled from the selection's top-left origin
+        ctx.save();
+        if (bounds) {
+            ctx.translate(float.tx + bounds.x, float.ty + bounds.y);
+            ctx.scale(sx, sy);
+            ctx.translate(-bounds.x, -bounds.y);
+        } else {
+            ctx.translate(float.tx, float.ty);
+        }
+        ctx.drawImage(float.canvas, 0, 0);
+        ctx.restore();
+        // Draw marching-ants border + corner resize handles
+        if (bounds) {
+            const bx = float.tx + bounds.x;
+            const by = float.ty + bounds.y;
+            const bw = bounds.w * sx;
+            const bh = bounds.h * sy;
+            ctx.save();
+            ctx.setLineDash([6, 3]);
+            ctx.strokeStyle = '#8b5cf6';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
+            ctx.restore();
+            const handleSize = 8;
+            const corners = [
+                { x: bx,      y: by      },
+                { x: bx + bw, y: by      },
+                { x: bx + bw, y: by + bh },
+                { x: bx,      y: by + bh },
+            ];
+            ctx.save();
+            ctx.setLineDash([]);
+            ctx.strokeStyle = '#8b5cf6';
+            ctx.fillStyle = 'white';
+            ctx.lineWidth = 1.5;
+            corners.forEach(c => {
+                ctx.fillRect(c.x - handleSize / 2, c.y - handleSize / 2, handleSize, handleSize);
+                ctx.strokeRect(c.x - handleSize / 2, c.y - handleSize / 2, handleSize, handleSize);
+            });
+            ctx.restore();
+        } else {
+            const sel = float.sel;
+            ctx.save();
+            ctx.translate(float.tx, float.ty);
+            ctx.setLineDash([6, 3]);
+            ctx.strokeStyle = '#8b5cf6';
+            ctx.lineWidth = 1.5;
+            if (sel.type === 'rect') {
+                ctx.strokeRect(sel.x + 0.5, sel.y + 0.5, sel.w, sel.h);
+            } else if (sel.type === 'lasso' && sel.points.length > 2) {
+                ctx.beginPath();
+                ctx.moveTo(sel.points[0].x, sel.points[0].y);
+                for (let i = 1; i < sel.points.length; i++) ctx.lineTo(sel.points[i].x, sel.points[i].y);
+                ctx.closePath();
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+    };
+
+    // Paste the floating selection onto the active layer at its final position+scale, then clear the float
+    const commitFloat = () => {
+        const float = floatingSelRef.current;
+        if (!float || !activeLayerId) return;
+        const canvasEl = canvasRefs.current[activeLayerId]?.current;
+        if (!canvasEl) return;
+        const ctx = canvasEl.getContext('2d');
+        const bounds = getSelBounds(float.sel);
+        const sx = float.sx ?? 1;
+        const sy = float.sy ?? 1;
+        ctx.save();
+        if (bounds) {
+            ctx.translate(float.tx + bounds.x, float.ty + bounds.y);
+            ctx.scale(sx, sy);
+            ctx.translate(-bounds.x, -bounds.y);
+        } else {
+            ctx.translate(float.tx, float.ty);
+        }
+        ctx.drawImage(float.canvas, 0, 0);
+        ctx.restore();
+        floatingSelRef.current = null;
+        selectionRef.current = null;
+        setSelectionActive(false);
+        clearOverlay();
+        updateLayerThumbnail(activeLayerId);
+    };
+
+    // Cancel float: restore pixels at their original position
+    const cancelFloat = () => {
+        const float = floatingSelRef.current;
+        if (!float || !activeLayerId) return;
+        const canvasEl = canvasRefs.current[activeLayerId]?.current;
+        if (!canvasEl) return;
+        canvasEl.getContext('2d').drawImage(float.canvas, 0, 0);
+        floatingSelRef.current = null;
+        if (selectionRef.current) drawSelectionOnOverlay(selectionRef.current);
+        else clearOverlay();
+        updateLayerThumbnail(activeLayerId);
+    };
+
+    // Returns a Path2D clipping region in layer-local coordinate space.
+    // sel coords are in canvas space; we convert using the layer transform t.
+    const applySelectionClipPath = (sel, t) => {
+        const path = new Path2D();
+        if (sel.type === 'rect') {
+            path.rect(
+                (sel.x - t.x) / t.scale,
+                (sel.y - t.y) / t.scale,
+                sel.w / t.scale,
+                sel.h / t.scale,
+            );
+        } else if (sel.type === 'lasso' && sel.points.length > 2) {
+            const p0 = sel.points[0];
+            path.moveTo((p0.x - t.x) / t.scale, (p0.y - t.y) / t.scale);
+            for (let i = 1; i < sel.points.length; i++) {
+                const p = sel.points[i];
+                path.lineTo((p.x - t.x) / t.scale, (p.y - t.y) / t.scale);
+            }
+            path.closePath();
+        }
+        return path;
+    };
+
+    // Commits a completed shape drag to the active layer canvas
+    const commitShape = (op) => {
+        if (!activeLayerId) return;
+        const canvasEl = canvasRefs.current[activeLayerId]?.current;
+        if (!canvasEl) return;
+        const activeLayerForShape = layers.find(l => l.id === activeLayerId);
+        const t = activeLayerForShape?.transform || { x: 0, y: 0, scale: 1 };
+        // Convert from wrapper-space to layer canvas-space
+        const toLocal = (gx, gy) => ({ x: (gx - t.x) / t.scale, y: (gy - t.y) / t.scale });
+        const ctx = canvasEl.getContext('2d');
+        ctx.save();
+        // Clip shape to an active selection if present
+        if (selectionRef.current) {
+            ctx.clip(applySelectionClipPath(selectionRef.current, t));
+        }
+        ctx.strokeStyle = brushColor;
+        ctx.lineWidth = brushSize / t.scale;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.globalCompositeOperation = 'source-over';
+        if (op.tool === 'shape-rect') {
+            const p1 = toLocal(Math.min(op.startX, op.endX), Math.min(op.startY, op.endY));
+            const p2 = toLocal(Math.max(op.startX, op.endX), Math.max(op.startY, op.endY));
+            ctx.strokeRect(p1.x, p1.y, p2.x - p1.x, p2.y - p1.y);
+        } else if (op.tool === 'shape-circle') {
+            const p1 = toLocal(op.startX, op.startY);
+            const p2 = toLocal(op.endX, op.endY);
+            const cx = (p1.x + p2.x) / 2;
+            const cy = (p1.y + p2.y) / 2;
+            const rx = Math.abs(p2.x - p1.x) / 2;
+            const ry = Math.abs(p2.y - p1.y) / 2;
+            if (rx > 0 && ry > 0) {
+                ctx.beginPath();
+                ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
+        updateLayerThumbnail(activeLayerId);
+    };
+
+    // Commits typed text to the active layer canvas
+    const commitTextToLayer = (text, canvasX, canvasY, fontSize) => {
+        if (!activeLayerId || !text.trim()) return;
+        const canvasEl = canvasRefs.current[activeLayerId]?.current;
+        if (!canvasEl) return;
+        const layerForText = layers.find(l => l.id === activeLayerId);
+        const t = layerForText?.transform || { x: 0, y: 0, scale: 1 };
+        const ctx = canvasEl.getContext('2d');
+        ctx.save();
+        if (selectionRef.current) {
+            ctx.clip(applySelectionClipPath(selectionRef.current, t));
+        }
+        ctx.fillStyle = brushColor;
+        const resolvedFontSize = fontSize ?? Math.max(12, brushSize * 6);
+        ctx.font = `${resolvedFontSize}px sans-serif`;
+        ctx.globalCompositeOperation = 'source-over';
+        // Support multiline: split on newlines, use lineHeight spacing
+        const lines = text.split('\n');
+        const lineHeight = resolvedFontSize * 1.2;
+        lines.forEach((line, i) => {
+            ctx.fillText(line, canvasX, canvasY + resolvedFontSize * 0.85 + lineHeight * i);
+        });
+        ctx.restore();
+        updateLayerThumbnail(activeLayerId);
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     const startDrawing = (e) => {
+        // If text input is open and user clicks outside it, commit the text and eat the click
+        if (textInput.visible) {
+            if (textInput.value.trim()) {
+                commitTextToLayer(textInput.value, textInput.canvasX, textInput.canvasY, textInput.canvasFontSize);
+            }
+            setTextInput({ visible: false, x: 0, y: 0, value: '', canvasX: 0, canvasY: 0, width: 200, height: 60, canvasFontSize: 24 });
+            return;
+        }
+
+        // Space held = temporary pan regardless of active tool
+        if (spaceHeld.current) {
+            setTransformState({
+                mode: 'pan',
+                startX: e.clientX,
+                startY: e.clientY,
+                initialOffset: { ...viewOffset }
+            });
+            return;
+        }
+
         // Handle Pan Tool (View Panning)
         if (activeTool === 'pan') {
             let clientX, clientY;
@@ -200,6 +717,22 @@ const MultiLayerCanvas = forwardRef(({
             return;
         }
 
+        // Zoom is a view operation — no active layer needed
+        if (activeTool === 'zoom') {
+            const factor = e.shiftKey ? 1 / 1.25 : 1.25;
+            const containerRect = containerRef.current?.getBoundingClientRect();
+            if (containerRect) {
+                const clickX = e.clientX - containerRect.left - containerRect.width / 2;
+                const clickY = e.clientY - containerRect.top - containerRect.height / 2;
+                setViewOffset(prev => ({
+                    x: clickX - (clickX - prev.x) * factor,
+                    y: clickY - (clickY - prev.y) * factor,
+                }));
+                setViewScale(prev => Math.min(Math.max(0.1, prev * factor), 10));
+            }
+            return;
+        }
+
         if (!activeLayerId) return;
         const activeLayer = layers.find(l => l.id === activeLayerId);
         if (!activeLayer) return;
@@ -209,6 +742,117 @@ const MultiLayerCanvas = forwardRef(({
         const pos = getMousePos(e);
 
         if (activeTool === 'transform') {
+            // If a float is already active, interact with it before creating a new one
+            if (floatingSelRef.current) {
+                const float = floatingSelRef.current;
+                const bounds = getSelBounds(float.sel);
+                if (bounds) {
+                    const sx = float.sx ?? 1;
+                    const sy = float.sy ?? 1;
+                    const bx = float.tx + bounds.x;
+                    const by = float.ty + bounds.y;
+                    const bw = bounds.w * sx;
+                    const bh = bounds.h * sy;
+                    const handleHalf = 8;
+                    const corners = [
+                        { x: bx,      y: by      }, // TL
+                        { x: bx + bw, y: by      }, // TR
+                        { x: bx + bw, y: by + bh }, // BR
+                        { x: bx,      y: by + bh }, // BL
+                    ];
+                    let hitFloatHandle = null;
+                    for (let i = 0; i < corners.length; i++) {
+                        if (Math.abs(pos.x - corners[i].x) < handleHalf && Math.abs(pos.y - corners[i].y) < handleHalf) {
+                            hitFloatHandle = i;
+                            break;
+                        }
+                    }
+                    if (hitFloatHandle !== null) {
+                        const anchorIdx = (hitFloatHandle + 2) % 4;
+                        setTransformState({
+                            mode: 'float-resize', handle: hitFloatHandle,
+                            startX: pos.x, startY: pos.y,
+                            startSx: sx, startSy: sy,
+                            initialTx: float.tx, initialTy: float.ty,
+                            anchorX: corners[anchorIdx].x, anchorY: corners[anchorIdx].y,
+                        });
+                        return;
+                    }
+                    if (pos.x >= bx && pos.x <= bx + bw && pos.y >= by && pos.y <= by + bh) {
+                        // Move the already-floating selection; capture current tx/ty so re-moves accumulate
+                        setTransformState({ mode: 'float-move', startX: pos.x, startY: pos.y, initialTx: float.tx, initialTy: float.ty });
+                        return;
+                    }
+                    // Click outside float bounds — commit it
+                    commitFloat();
+                    return;
+                }
+            }
+
+            const sel = selectionRef.current;
+
+            // If a selection is active: check corner handles OR inside region to create a float
+            if (sel) {
+                const bounds = getSelBounds(sel);
+                if (bounds) {
+                    const handleHalf = 9;
+                    const selCorners = [
+                        { x: bounds.x,           y: bounds.y           }, // 0: TL
+                        { x: bounds.x + bounds.w, y: bounds.y           }, // 1: TR
+                        { x: bounds.x + bounds.w, y: bounds.y + bounds.h }, // 2: BR
+                        { x: bounds.x,           y: bounds.y + bounds.h }, // 3: BL
+                    ];
+                    let hitSelHandle = null;
+                    for (let i = 0; i < selCorners.length; i++) {
+                        if (Math.abs(pos.x - selCorners[i].x) < handleHalf && Math.abs(pos.y - selCorners[i].y) < handleHalf) {
+                            hitSelHandle = i;
+                            break;
+                        }
+                    }
+                    const insideSel = pos.x >= bounds.x && pos.x <= bounds.x + bounds.w &&
+                                      pos.y >= bounds.y && pos.y <= bounds.y + bounds.h;
+
+                    if (hitSelHandle !== null || insideSel) {
+                        const canvasEl = canvasRefs.current[activeLayerId]?.current;
+                        if (canvasEl) {
+                            // Extract selected pixels into an offscreen canvas
+                            const floatCanvas = document.createElement('canvas');
+                            floatCanvas.width = canvasSize.width;
+                            floatCanvas.height = canvasSize.height;
+                            const floatCtx = floatCanvas.getContext('2d');
+                            floatCtx.save();
+                            floatCtx.clip(applySelectionClipPath(sel, activeLayer.transform || { x: 0, y: 0, scale: 1 }));
+                            floatCtx.drawImage(canvasEl, 0, 0);
+                            floatCtx.restore();
+
+                            // Erase those pixels from the layer canvas
+                            const layerCtx = canvasEl.getContext('2d');
+                            layerCtx.save();
+                            layerCtx.globalCompositeOperation = 'destination-out';
+                            layerCtx.clip(applySelectionClipPath(sel, activeLayer.transform || { x: 0, y: 0, scale: 1 }));
+                            layerCtx.fillRect(0, 0, canvasSize.width, canvasSize.height);
+                            layerCtx.restore();
+
+                            floatingSelRef.current = { canvas: floatCanvas, sel, tx: 0, ty: 0, sx: 1, sy: 1 };
+                            renderFloatOnOverlay();
+                            if (hitSelHandle !== null) {
+                                const anchorIdx = (hitSelHandle + 2) % 4;
+                                setTransformState({
+                                    mode: 'float-resize', handle: hitSelHandle,
+                                    startX: pos.x, startY: pos.y,
+                                    startSx: 1, startSy: 1,
+                                    initialTx: 0, initialTy: 0,
+                                    anchorX: selCorners[anchorIdx].x, anchorY: selCorners[anchorIdx].y,
+                                });
+                            } else {
+                                setTransformState({ mode: 'float-move', startX: pos.x, startY: pos.y, initialTx: 0, initialTy: 0 });
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+
             const transform = activeLayer.transform || { x: 0, y: 0, scale: 1 };
             const bounds = activeLayer.bounds || { x: 0, y: 0, width: canvasSize.width, height: canvasSize.height };
 
@@ -268,12 +912,99 @@ const MultiLayerCanvas = forwardRef(({
         if (activeTool === 'brush' || activeTool === 'eraser') {
             setIsDrawing(true);
             draw(e);
+            return;
+        }
+
+        // Select: rectangular marquee
+        if (activeTool === 'select') {
+            selectionRef.current = null;
+            setSelectionActive(false);
+            clearOverlay();
+            operationRef.current = { tool: 'select', startX: pos.x, startY: pos.y, endX: pos.x, endY: pos.y };
+            return;
+        }
+
+        // Lasso: freehand marquee
+        if (activeTool === 'lasso') {
+            selectionRef.current = null;
+            setSelectionActive(false);
+            clearOverlay();
+            operationRef.current = { tool: 'lasso', points: [{ x: pos.x, y: pos.y }] };
+            return;
+        }
+
+        // Shape tools: drag to draw rectangle or ellipse
+        if (activeTool === 'shape-rect' || activeTool === 'shape-circle') {
+            operationRef.current = { tool: activeTool, startX: pos.x, startY: pos.y, endX: pos.x, endY: pos.y };
+            return;
+        }
+
+        // Text tool: show inline resizable input at the exact screen position of the click
+        if (activeTool === 'text' && containerRef.current) {
+            const activeLayerForText = layers.find(l => l.id === activeLayerId);
+            const t = activeLayerForText?.transform || { x: 0, y: 0, scale: 1 };
+            const containerRect = containerRef.current.getBoundingClientRect();
+            const initialHeight = 60;
+            const screenFont = Math.round(initialHeight * 0.5);
+            const canvasFont = Math.max(6, Math.round(screenFont / viewScale / t.scale));
+            setTextInput({
+                visible: true,
+                x: e.clientX - containerRect.left,
+                y: e.clientY - containerRect.top,
+                value: '',
+                canvasX: (pos.x - t.x) / t.scale,
+                canvasY: (pos.y - t.y) / t.scale,
+                width: 200,
+                height: initialHeight,
+                canvasFontSize: canvasFont,
+            });
         }
     };
 
     const stopDrawing = () => {
+        // End floating selection drag/resize without committing — float stays active for further adjustments
+        if (transformState?.mode === 'float-move' || transformState?.mode === 'float-resize') {
+            setTransformState(null);
+            return;
+        }
+
         if (transformState) {
             setTransformState(null);
+            return;
+        }
+
+        // Commit in-progress shape/selection operations
+        if (operationRef.current) {
+            const op = operationRef.current;
+            operationRef.current = null;
+            if (op.tool === 'shape-rect' || op.tool === 'shape-circle') {
+                commitShape(op);
+                clearOverlay();
+            } else if (op.tool === 'select') {
+                const x = Math.min(op.startX, op.endX);
+                const y = Math.min(op.startY, op.endY);
+                const w = Math.abs(op.endX - op.startX);
+                const h = Math.abs(op.endY - op.startY);
+                if (w > 2 && h > 2) {
+                    selectionRef.current = { type: 'rect', x, y, w, h };
+                    setSelectionActive(true);
+                    drawSelectionOnOverlay(selectionRef.current);
+                } else {
+                    selectionRef.current = null;
+                    setSelectionActive(false);
+                    clearOverlay();
+                }
+            } else if (op.tool === 'lasso') {
+                if (op.points.length > 2) {
+                    selectionRef.current = { type: 'lasso', points: op.points };
+                    setSelectionActive(true);
+                    drawSelectionOnOverlay(selectionRef.current);
+                } else {
+                    selectionRef.current = null;
+                    setSelectionActive(false);
+                    clearOverlay();
+                }
+            }
             return;
         }
 
@@ -324,6 +1055,66 @@ const MultiLayerCanvas = forwardRef(({
 
         const pos = getMousePos(e);
 
+        // Handle floating selection drag
+        if (transformState?.mode === 'float-move') {
+            const float = floatingSelRef.current;
+            if (float) {
+                // Use initialTx/Ty so re-moves accumulate correctly
+                float.tx = (transformState.initialTx ?? 0) + (pos.x - transformState.startX);
+                float.ty = (transformState.initialTy ?? 0) + (pos.y - transformState.startY);
+                renderFloatOnOverlay();
+            }
+            return;
+        }
+
+        // Handle floating selection resize (anchor-aware — opposite corner stays fixed)
+        if (transformState?.mode === 'float-resize') {
+            const float = floatingSelRef.current;
+            if (float) {
+                const bounds = getSelBounds(float.sel);
+                if (bounds) {
+                    const ts = transformState;
+                    const dx = pos.x - ts.startX;
+                    const dy = pos.y - ts.startY;
+                    const startW = bounds.w * ts.startSx;
+                    const startH = bounds.h * ts.startSy;
+                    let new_sx, new_sy, new_tx, new_ty;
+                    switch (ts.handle) {
+                        case 2: // BR — anchor TL, grow right+down
+                            new_sx = Math.max(0.1, (startW + dx) / bounds.w);
+                            new_sy = Math.max(0.1, (startH + dy) / bounds.h);
+                            new_tx = ts.initialTx; new_ty = ts.initialTy;
+                            break;
+                        case 0: // TL — anchor BR, grow left+up
+                            new_sx = Math.max(0.1, (startW - dx) / bounds.w);
+                            new_sy = Math.max(0.1, (startH - dy) / bounds.h);
+                            new_tx = ts.anchorX - bounds.x - bounds.w * new_sx;
+                            new_ty = ts.anchorY - bounds.y - bounds.h * new_sy;
+                            break;
+                        case 1: // TR — anchor BL, grow right+up
+                            new_sx = Math.max(0.1, (startW + dx) / bounds.w);
+                            new_sy = Math.max(0.1, (startH - dy) / bounds.h);
+                            new_tx = ts.anchorX - bounds.x;
+                            new_ty = ts.anchorY - bounds.y - bounds.h * new_sy;
+                            break;
+                        case 3: // BL — anchor TR, grow left+down
+                            new_sx = Math.max(0.1, (startW - dx) / bounds.w);
+                            new_sy = Math.max(0.1, (startH + dy) / bounds.h);
+                            new_tx = ts.anchorX - bounds.x - bounds.w * new_sx;
+                            new_ty = ts.anchorY - bounds.y;
+                            break;
+                        default:
+                            new_sx = ts.startSx; new_sy = ts.startSy;
+                            new_tx = ts.initialTx; new_ty = ts.initialTy;
+                    }
+                    float.sx = new_sx; float.sy = new_sy;
+                    float.tx = new_tx; float.ty = new_ty;
+                    renderFloatOnOverlay();
+                }
+            }
+            return;
+        }
+
         if (transformState && activeLayerId) {
             e.preventDefault();
 
@@ -360,6 +1151,26 @@ const MultiLayerCanvas = forwardRef(({
             return;
         }
 
+        // Handle in-progress shape/selection/lasso operations
+        if (operationRef.current) {
+            const op = operationRef.current;
+            if (op.tool === 'select' || op.tool === 'shape-rect' || op.tool === 'shape-circle') {
+                op.endX = pos.x;
+                op.endY = pos.y;
+                drawOverlayPreview();
+            } else if (op.tool === 'lasso') {
+                const last = op.points[op.points.length - 1];
+                const dx = pos.x - last.x;
+                const dy = pos.y - last.y;
+                // Throttle: only record a point every ≥4px to keep array lean
+                if (dx * dx + dy * dy >= 16) {
+                    op.points.push({ x: pos.x, y: pos.y });
+                    drawOverlayPreview();
+                }
+            }
+            return;
+        }
+
         if (!isDrawing) return;
         if (!activeLayerId || (activeTool !== 'brush' && activeTool !== 'eraser')) return;
 
@@ -384,52 +1195,59 @@ const MultiLayerCanvas = forwardRef(({
             ctx.beginPath();
             ctx.moveTo(localX, localY);
         } else {
+            // Clip to an active selection so drawing is confined to it
+            const sel = selectionRef.current;
+            if (sel) ctx.save();
+            if (sel) ctx.clip(applySelectionClipPath(sel, transform));
             ctx.lineTo(localX, localY);
             ctx.stroke();
+            if (sel) ctx.restore();
             ctx.beginPath();
             ctx.moveTo(localX, localY);
         }
     };
 
     const bakeLayerTransform = (layerId) => {
-        const canvasRef = canvasRefs.current[layerId];
-        if (!canvasRef || !canvasRef.current) return;
-
         const layer = layers.find(l => l.id === layerId);
-        if (!layer) return;
+        // Read from stored canvasData, NOT from the DOM canvas.
+        // The DOM canvas may have transform handles painted onto it by the
+        // draw-layer-content useEffect; baking from canvasData ensures those
+        // handles are never written into the actual image pixels.
+        if (!layer || !layer.canvasData) return;
 
         const transform = layer.transform || { x: 0, y: 0, scale: 1 };
-
-        // If no significant transform, skip
         if (transform.x === 0 && transform.y === 0 && transform.scale === 1) return;
 
-        // Create temp canvas
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = canvasSize.width;
-        tempCanvas.height = canvasSize.height;
-        const ctx = tempCanvas.getContext('2d');
+        const img = new Image();
+        img.onload = () => {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = canvasSize.width;
+            tempCanvas.height = canvasSize.height;
+            const ctx = tempCanvas.getContext('2d');
+            ctx.save();
+            ctx.translate(transform.x, transform.y);
+            ctx.scale(transform.scale, transform.scale);
+            ctx.drawImage(img, 0, 0);
+            ctx.restore();
 
-        // Draw with transform
-        ctx.translate(transform.x, transform.y);
-        ctx.scale(transform.scale, transform.scale);
-        ctx.drawImage(canvasRef.current, 0, 0);
-
-        // Update layer data
-        const newData = tempCanvas.toDataURL('image/png');
-
-        // Calculate new bounds
-        const newBounds = getContentBounds(tempCanvas);
-
-        onLayerUpdate(layerId, {
-            canvasData: newData,
-            transform: { x: 0, y: 0, scale: 1 }, // Reset transform
-            bounds: newBounds
-        });
+            const newData = tempCanvas.toDataURL('image/png');
+            const newBounds = getContentBounds(tempCanvas);
+            onLayerUpdate(layerId, {
+                canvasData: newData,
+                transform: { x: 0, y: 0, scale: 1 },
+                bounds: newBounds,
+            });
+        };
+        img.src = layer.canvasData;
     };
 
-    // Bake transform when switching away from transform tool
+    // Bake transform when switching away from transform tool;
+    // also commit any in-flight floating selection first
     useEffect(() => {
         if (activeTool !== 'transform' && activeLayerId) {
+            if (floatingSelRef.current) {
+                commitFloat();
+            }
             bakeLayerTransform(activeLayerId);
         }
     }, [activeTool, activeLayerId]);
@@ -564,7 +1382,9 @@ const MultiLayerCanvas = forwardRef(({
 
         setCanvasSize: (width, height) => {
             setCanvasSize({ width, height });
-        }
+        },
+
+        getCanvasSize: () => ({ ...canvasSize }),
     }));
 
     return (
@@ -576,7 +1396,15 @@ const MultiLayerCanvas = forwardRef(({
                 height: '100%',
                 overflow: 'hidden',
                 position: 'relative',
-                cursor: activeTool === 'pan' ? (transformState?.mode === 'pan' ? 'grabbing' : 'grab') : 'none' // Hide default cursor for brush
+                cursor: activeTool === 'pan'
+                    ? (transformState?.mode === 'pan' ? 'grabbing' : 'grab')
+                    : activeTool === 'text'
+                    ? 'text'
+                    : activeTool === 'zoom'
+                    ? 'zoom-in'
+                    : ['select', 'lasso', 'shape-rect', 'shape-circle'].includes(activeTool)
+                    ? 'crosshair'
+                    : 'none'
             }}
             onMouseDown={startDrawing}
             onMouseUp={stopDrawing}
@@ -624,7 +1452,133 @@ const MultiLayerCanvas = forwardRef(({
                         />
                     );
                 })}
+
+                {/* Overlay canvas — live preview for shapes and selections */}
+                <canvas
+                    ref={overlayCanvasRef}
+                    width={canvasSize.width}
+                    height={canvasSize.height}
+                    style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        pointerEvents: 'none',
+                        zIndex: 100,
+                    }}
+                />
             </div>
+
+            {/* Text input overlay — resizable box. Enter = newline, Shift+Enter = stamp, click outside = stamp */}
+            {textInput.visible && (
+                <div
+                    style={{
+                        position: 'absolute',
+                        left: textInput.x,
+                        top: textInput.y,
+                        width: textInput.width,
+                        height: textInput.height,
+                        zIndex: 200,
+                        pointerEvents: 'auto',
+                        border: '1.5px dashed #8b5cf6',
+                        borderRadius: 3,
+                        background: 'rgba(255,255,255,0.92)',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                    }}
+                    onMouseDown={e => e.stopPropagation()}
+                >
+                    <textarea
+                        ref={textInputFieldRef}
+                        value={textInput.value}
+                        onChange={(e) => setTextInput(prev => ({ ...prev, value: e.target.value }))}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                                setTextInput({ visible: false, x: 0, y: 0, value: '', canvasX: 0, canvasY: 0, width: 200, height: 60, canvasFontSize: 24 });
+                            }
+                            // Shift+Enter = stamp; plain Enter = natural newline in the textarea
+                            if (e.key === 'Enter' && e.shiftKey) {
+                                e.preventDefault();
+                                if (textInput.value.trim()) commitTextToLayer(textInput.value, textInput.canvasX, textInput.canvasY, textInput.canvasFontSize);
+                                setTextInput({ visible: false, x: 0, y: 0, value: '', canvasX: 0, canvasY: 0, width: 200, height: 60, canvasFontSize: 24 });
+                            }
+                            e.stopPropagation();
+                        }}
+                        style={{
+                            flex: 1,
+                            background: 'transparent',
+                            border: 'none',
+                            outline: 'none',
+                            padding: '4px 6px',
+                            fontSize: `${Math.round(textInput.height * 0.5)}px`,
+                            color: brushColor,
+                            fontFamily: 'sans-serif',
+                            resize: 'none',
+                            overflow: 'hidden',
+                            lineHeight: 1.2,
+                        }}
+                        placeholder="Type… Shift+Enter to stamp"
+                    />
+                    {/* SE corner drag handle — drag to resize box → changes stamped font size */}
+                    <div
+                        style={{
+                            position: 'absolute',
+                            bottom: 0,
+                            right: 0,
+                            width: 16,
+                            height: 16,
+                            cursor: 'se-resize',
+                            background: '#8b5cf6',
+                            borderRadius: '2px 0 3px 0',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'white',
+                            fontSize: 9,
+                            fontWeight: 'bold',
+                            userSelect: 'none',
+                        }}
+                        onMouseDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault(); // keep textarea focused
+                            const layerT = (layers.find(l => l.id === activeLayerId)?.transform) || { x: 0, y: 0, scale: 1 };
+                            textResizeRef.current = {
+                                active: true,
+                                startX: e.clientX,
+                                startY: e.clientY,
+                                startWidth: textInput.width,
+                                startHeight: textInput.height,
+                                viewScale,
+                                layerScale: layerT.scale,
+                            };
+                        }}
+                    >⤡</div>
+                </div>
+            )}
+
+            {/* Selection active badge — persists across tool switches */}
+            {selectionActive && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: 40,
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    background: 'rgba(15, 10, 30, 0.78)',
+                    backdropFilter: 'blur(6px)',
+                    WebkitBackdropFilter: 'blur(6px)',
+                    color: '#e5e7eb',
+                    fontSize: 12,
+                    padding: '5px 14px',
+                    borderRadius: 20,
+                    border: '1px solid rgba(139, 92, 246, 0.35)',
+                    whiteSpace: 'nowrap',
+                    pointerEvents: 'none',
+                    zIndex: 500,
+                }}>
+                    <span style={{ fontWeight: 700, color: '#a78bfa', marginRight: 5 }}>Selection active</span>
+                    Esc to clear · Delete to erase
+                </div>
+            )}
 
             {/* Brush Cursor Indicator */}
             {(activeTool === 'brush' || activeTool === 'eraser') && (
