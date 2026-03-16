@@ -1,7 +1,9 @@
 import torch
 import io
-from flask import Flask, request, send_file, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
+import uvicorn
 from PIL import Image
 from torchvision import transforms
 import os
@@ -38,9 +40,14 @@ STYLEGAN_MODEL_PATH = os.path.join(script_dir, 'model', 'stylegan_human_v2_1024.
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
-# --- 2. INITIALIZE FLASK APP AND LOAD MODELS ---
-app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+# --- 2. INITIALIZE FASTAPI APP AND LOAD MODELS ---
+app = FastAPI(title="ClothCraft AI")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Load Pix2Pix model for doodle translation
 try:
@@ -231,117 +238,102 @@ def outpaint_to_full_body(img_pil):
 # --- 3. DEFINE API ENDPOINTS ---
 
 # Route for translating doodle with Pix2Pix
-@app.route('/translate-doodle', methods=['POST'])
-def translate_doodle_endpoint():
+@app.post('/translate-doodle')
+async def translate_doodle_endpoint(file: UploadFile = File(...)):
     """Translates doodle using Pix2Pix model"""
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
-    
     try:
-        img_bytes = file.read()
+        img_bytes = await file.read()
         result_bytes = translate_doodle(img_bytes)
-        return send_file(result_bytes, mimetype='image/png')
+        return StreamingResponse(result_bytes, media_type='image/png')
     except Exception as e:
         print(f"Error translating doodle: {e}")
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Route for inpainting with Stable Diffusion
-@app.route('/inpaint', methods=['POST'])
-def inpaint():
+@app.post('/inpaint')
+async def inpaint(
+    reference: UploadFile = File(...),
+    mask: UploadFile = File(...),
+    prompt: str = Form('high quality, detailed'),
+    strength: str = Form('0.75'),
+):
     """Inpaints reference image using Stable Diffusion with translated doodle as mask"""
-    if 'reference' not in request.files or 'mask' not in request.files:
-        return jsonify({"error": "Missing reference or mask"}), 400
-    
-    reference_file = request.files['reference']
-    mask_file = request.files['mask']
-    prompt = request.form.get('prompt', 'high quality, detailed')
-    strength = request.form.get('strength', '0.75')
-    
     print("👕 Starting Clothify Inpainting...")
-    
     try:
-        reference_bytes = reference_file.read()
-        mask_bytes = mask_file.read()
+        reference_bytes = await reference.read()
+        mask_bytes = await mask.read()
         result_bytes = inpaint_with_stable_diffusion(
-            reference_bytes, 
-            mask_bytes, 
+            reference_bytes,
+            mask_bytes,
             prompt,
             float(strength)
         )
-        return send_file(result_bytes, mimetype='image/png')
+        return StreamingResponse(result_bytes, media_type='image/png')
     except Exception as e:
         print(f"Error inpainting: {e}")
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Legacy endpoint (kept for backward compatibility)
-@app.route('/predict', methods=['POST'])
-def predict():
+@app.post('/predict')
+async def predict(file: UploadFile = File(...)):
     """Legacy endpoint - redirects to translate-doodle"""
-    return translate_doodle_endpoint()
+    return await translate_doodle_endpoint(file)
 
 # Route for refining pattern
-@app.route('/refine-pattern', methods=['POST'])
-def refine_pattern_endpoint():
+@app.post('/refine-pattern')
+async def refine_pattern_endpoint(
+    image: UploadFile = File(...),
+    prompt: str = Form('seamless pattern, high quality'),
+    strength: str = Form('0.6'),
+):
     """Refines a pattern using Stable Diffusion (img2img via inpainting)"""
-    if 'image' not in request.files:
-        return jsonify({"error": "No image file"}), 400
-    
-    image_file = request.files['image']
-    prompt = request.form.get('prompt', 'seamless pattern, high quality')
-    strength = request.form.get('strength', '0.6')
-    
     print("✨ Starting Pattern Refinement...")
-    
     try:
-        image_bytes = image_file.read()
+        image_bytes = await image.read()
         
         # Create a full white mask for the image
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        mask = Image.new("L", img.size, 255) # White mask = inpaint everything
+        mask = Image.new("L", img.size, 255)  # White mask = inpaint everything
         
         mask_io = io.BytesIO()
         mask.save(mask_io, format="PNG")
         mask_bytes = mask_io.getvalue()
         
-        # Use existing inpaint function
         result_bytes = inpaint_with_stable_diffusion(
-            image_bytes, 
-            mask_bytes, 
+            image_bytes,
+            mask_bytes,
             prompt,
             strength=float(strength)
         )
-        return send_file(result_bytes, mimetype='image/png')
+        return StreamingResponse(result_bytes, media_type='image/png')
     except Exception as e:
         print(f"Error refining pattern: {e}")
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Global cache for latents to make slider adjustments instant
 latent_cache = {}
 import hashlib
 
 # Route for Style Bending
-@app.route('/blend-styles', methods=['POST'])
-def blend_styles():
+@app.post('/blend-styles')
+async def blend_styles(
+    image1: UploadFile = File(...),
+    image2: UploadFile = File(...),
+    alpha: str = Form('0.5'),
+    outpaint1: str = Form('false'),
+    outpaint2: str = Form('false'),
+):
     """Projects two images to latent space and blends them"""
     if stylegan_model is None:
-        return jsonify({"error": "StyleGAN model not loaded"}), 500
-
-    if 'image1' not in request.files or 'image2' not in request.files:
-        return jsonify({"error": "Missing image1 or image2"}), 400
+        raise HTTPException(status_code=500, detail="StyleGAN model not loaded")
 
     # Read raw bytes
-    image1_bytes = request.files['image1'].read()
-    image2_bytes = request.files['image2'].read()
-    alpha = request.form.get('alpha', '0.5')
+    image1_bytes = await image1.read()
+    image2_bytes = await image2.read()
 
-    # Optional outpaint flags (expect "true"/"false" strings)
-    outpaint1_flag = request.form.get('outpaint1', 'false').lower() == 'true'
-    outpaint2_flag = request.form.get('outpaint2', 'false').lower() == 'true'
-    
+    outpaint1_flag = outpaint1.lower() == 'true'
+    outpaint2_flag = outpaint2.lower() == 'true'
+
     print(f"👗 Starting Style Bending with alpha={alpha}...")
     
     try:
@@ -386,14 +378,15 @@ def blend_styles():
             b64 = base64.b64encode(byte_io.getvalue()).decode('utf-8')
             frames.append(f"data:image/jpeg;base64,{b64}")
             
-        return jsonify({"frames": frames})
+        return JSONResponse({"frames": frames})
     except Exception as e:
         print(f"Error blending styles: {e}")
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- 4. RUN THE APP ---
 if __name__ == '__main__':
-    print("\n🚀 Starting Flask server...")
-    print("API endpoint: http://127.0.0.1:5000/predict")
-    print("React frontend should run on http://localhost:3000")
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    print("\n🚀 Starting FastAPI server...")
+    print("Docs:          http://127.0.0.1:5000/docs")
+    print("API endpoint:  http://127.0.0.1:5000/predict")
+    print("React frontend should run on http://localhost:5173")
+    uvicorn.run(app, host='0.0.0.0', port=5000)

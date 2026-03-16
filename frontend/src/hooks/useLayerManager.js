@@ -110,6 +110,16 @@ export const useLayerManager = () => {
     });
   }, []);
 
+  /**
+   * Replace all layers at once — used when opening a saved project.
+   * @param {array}       newLayers
+   * @param {string|null} newActiveId
+   */
+  const loadAllLayers = useCallback((newLayers, newActiveId) => {
+    setLayers(newLayers || []);
+    setActiveLayerId(newActiveId || newLayers?.[0]?.id || null);
+  }, []);
+
   return {
     layers,
     activeLayerId,
@@ -124,5 +134,6 @@ export const useLayerManager = () => {
     getReferenceLayer,
     getVisibleLayers,
     clearDrawingLayers,
+    loadAllLayers,
   };
 };

@@ -6,11 +6,8 @@ scikit-image>=0.22
 click>=8.1
 tqdm>=4.66
 
-# Torch stack: pinned but install via CUDA index-url for GPU wheels
-# See commands below to install CUDA 12.1 or 11.8 builds.
-torch==2.3.1
-torchvision==0.18.1
-torchaudio==2.3.1
+# Torch stack: installed separately — see README for CPU-only install command
+# pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 
 # Perceptual similarity for projection
 lpips==0.1.4 

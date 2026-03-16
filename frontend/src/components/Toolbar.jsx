@@ -3,7 +3,7 @@ import {
     Paintbrush,
     Eraser,
     Hand,
-    Square,
+    BoxSelect,
     Lasso,
     RectangleHorizontal,
     Circle,
@@ -16,19 +16,22 @@ import './Toolbar.css';
 
 const Toolbar = ({ activeTool, onToolChange, brushColor, onColorChange, moodboardColors, onOpenMoodboard, disabled }) => {
     const tools = [
-        { id: 'brush', icon: Paintbrush, label: 'Brush' },
-        { id: 'eraser', icon: Eraser, label: 'Eraser' },
-        { id: 'pan', icon: Hand, label: 'Pan' },
-        { id: 'select', icon: Square, label: 'Select' },
-        { id: 'lasso', icon: Lasso, label: 'Lasso' },
-        { id: 'shape-rect', icon: RectangleHorizontal, label: 'Rectangle' },
-        { id: 'shape-circle', icon: Circle, label: 'Circle' },
-        { id: 'text', icon: Type, label: 'Text' },
-        { id: 'transform', icon: Move, label: 'Transform' },
-        { id: 'zoom', icon: ZoomIn, label: 'Zoom' },
+        { id: 'brush',        icon: Paintbrush,          label: 'Brush',     hint: 'Drag to paint' },
+        { id: 'eraser',       icon: Eraser,              label: 'Eraser',    hint: 'Drag to erase pixels' },
+        { id: 'pan',          icon: Hand,                label: 'Pan',       hint: 'Drag to pan; or hold Space' },
+        { id: 'select',       icon: BoxSelect,           label: 'Select',    hint: 'Drag a marquee — Delete cuts selection, Esc commits float' },
+        { id: 'lasso',        icon: Lasso,               label: 'Lasso',     hint: 'Freehand selection — Delete cuts selection, Esc deselects' },
+        { id: 'shape-rect',   icon: RectangleHorizontal, label: 'Rectangle', hint: 'Drag to stroke a rectangle' },
+        { id: 'shape-circle', icon: Circle,              label: 'Circle',    hint: 'Drag to stroke an ellipse' },
+        { id: 'text',         icon: Type,                label: 'Text',      hint: 'Click canvas, type, then Enter to stamp' },
+        { id: 'transform',    icon: Move,                label: 'Transform', hint: 'Drag to move layer; drag corner handles to scale' },
+        { id: 'zoom',         icon: ZoomIn,              label: 'Zoom',      hint: 'Click = zoom in, Shift+click = zoom out, Ctrl+scroll = zoom' },
     ];
 
+    const activeToolObj = tools.find(t => t.id === activeTool);
+
     return (
+        <>
         <div className="toolbar">
             {tools.map((tool, index) => {
                 const IconComponent = tool.icon;
@@ -80,6 +83,14 @@ const Toolbar = ({ activeTool, onToolChange, brushColor, onColorChange, moodboar
                 </div>
             )}
         </div>
+
+        {activeToolObj?.hint && (
+            <div className="toolbar-hint-bar">
+                <span className="toolbar-hint-label">{activeToolObj.label}</span>
+                {activeToolObj.hint}
+            </div>
+        )}
+        </>
     );
 };
 
