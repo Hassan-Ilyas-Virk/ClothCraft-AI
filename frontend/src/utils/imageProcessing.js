@@ -8,7 +8,7 @@ export async function translateDoodle(doodleBlob) {
   formData.append('file', doodleBlob, 'doodle.png');
 
   try {
-    const response = await fetch('http://127.0.0.1:5000/translate-doodle', {
+    const response = await fetch('http://127.0.0.1:5001/translate-doodle', {
       method: 'POST',
       body: formData,
     });
@@ -227,7 +227,7 @@ export async function inpaintWithStableDiffusion(referenceBlob, maskBlob, prompt
   console.log(`📝 Prompt: "${prompt}"`);
 
   try {
-    const response = await fetch('http://127.0.0.1:5000/inpaint', {
+    const response = await fetch('http://127.0.0.1:5001/inpaint', {
       method: 'POST',
       body: formData,
     });
@@ -267,7 +267,7 @@ export async function blendStyles(image1Blob, image2Blob, alpha, outpaint1 = fal
   const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
 
   try {
-    const response = await fetch('http://127.0.0.1:5000/blend-styles', {
+    const response = await fetch('http://127.0.0.1:5001/blend-styles', {
       method: 'POST',
       body: formData,
       signal: controller.signal,
@@ -480,7 +480,7 @@ export async function refinePattern(imageBase64, prompt, strength = 0.6) {
   formData.append('strength', strength.toString());
 
   try {
-    const res = await fetch('http://127.0.0.1:5000/refine-pattern', {
+    const res = await fetch('http://127.0.0.1:5001/refine-pattern', {
       method: 'POST',
       body: formData,
     });
@@ -643,4 +643,81 @@ export function extractDominantColors(image, count = 4) {
     });
 
   return sortedColors;
+}
+
+/**
+ * Generate a human figure from a text prompt using Stable Diffusion
+ * @param {string} prompt - Text description of the human to generate
+ * @param {string} negativePrompt - What to avoid in generation
+ * @param {number} steps - Number of inference steps (default 50)
+ * @param {number} guidance - Guidance scale (default 7.5)
+ * @returns {Promise<Blob>} - The generated image as a Blob
+ */
+export async function generateHuman(prompt, negativePrompt = '', steps = 50, guidance = 7.5) {
+  const formData = new FormData();
+  formData.append('prompt', prompt);
+  formData.append('negative_prompt', negativePrompt || 'low quality, blurry, distorted, deformed, bad anatomy, extra limbs, ugly');
+  formData.append('steps', steps.toString());
+  formData.append('guidance', guidance.toString());
+
+  console.log(`🧑 Generating human: "${prompt}"`);
+
+  // 5-minute timeout — generation on CPU can take a while
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+
+  try {
+    const response = await fetch('http://127.0.0.1:5001/generate-human', {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      let errorMsg = 'Failed to generate human';
+      try {
+        const errorData = await response.json();
+        errorMsg = errorData.detail || errorMsg;
+      } catch (e) { }
+      throw new Error(errorMsg);
+    }
+
+    return await response.blob();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Generation timed out after 5 minutes. Try fewer steps or a simpler prompt.');
+    }
+    console.error('Error generating human:', error);
+    throw new Error(error.message || 'Failed to generate human');
+  }
+}
+
+/**
+ * Suggest colors based on a text prompt using backend AI
+ * @param {string} prompt - Text description of desired colors
+ * @returns {Promise<Blob>} - Generated color-blob image
+ */
+export async function suggestColors(prompt) {
+    const formData = new FormData();
+    formData.append('prompt', prompt);
+
+    console.log(`🎨 Requesting AI color suggestions for: "${prompt}"`);
+
+    try {
+        const response = await fetch('http://127.0.0.1:5001/suggest-colors', {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            throw new Error(`Server error: ${response.status}`);
+        }
+
+        return await response.blob();
+    } catch (error) {
+        console.error('Error suggesting colors:', error);
+        throw new Error('Failed to get AI color suggestions');
+    }
 }

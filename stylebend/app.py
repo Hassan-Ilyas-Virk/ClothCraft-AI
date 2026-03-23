@@ -30,7 +30,10 @@ def resolve_model_path(input_path: str) -> str:
 # Model path input and check
 with st.expander("Model settings", expanded=True):
 	model_path = st.text_input("Model .pkl path", value=MODEL_PATH_DEFAULT)
-	device_choice = st.selectbox("Device", ["cuda", "cpu"], index=0)
+	devices = ["cuda", "cpu"]
+	if torch.backends.mps.is_available():
+		devices.insert(1, "mps")
+	device_choice = st.selectbox("Device", devices, index=0)
 	resolved_path = resolve_model_path(model_path)
 	check = os.path.isfile(resolved_path)
 	st.write("Resolved path:", resolved_path)

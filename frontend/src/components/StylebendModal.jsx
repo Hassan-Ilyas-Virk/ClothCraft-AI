@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { X, SlidersHorizontal, ImagePlus, Sparkles } from 'lucide-react';
 import { blendStyles } from '../utils/imageProcessing';
+import './ProgressBar.css';
 
-const StylebendModal = ({ onClose, onApply }) => {
+const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
     const [image1, setImage1] = useState(null);
     const [image2, setImage2] = useState(null);
     const [image1Preview, setImage1Preview] = useState(null);
@@ -14,7 +15,25 @@ const StylebendModal = ({ onClose, onApply }) => {
     const [isGenerating, setIsGenerating] = useState(false);
     const [resultUrl, setResultUrl] = useState(null);
     const [frames, setFrames] = useState([]);
+    const [progress, setProgress] = useState(0);
+    const [status, setStatus] = useState('');
     const [error, setError] = useState(null);
+
+    React.useEffect(() => {
+        const loadInitialImage = async () => {
+            if (initialImage1Url) {
+                try {
+                    const res = await fetch(initialImage1Url);
+                    const blob = await res.blob();
+                    const file = new File([blob], 'subject.png', { type: blob.type });
+                    handleImageUpload(file, 1);
+                } catch (err) {
+                    console.error('Failed to load initial image for stylebend:', err);
+                }
+            }
+        };
+        loadInitialImage();
+    }, [initialImage1Url]); // Only run on mount or when url changes
 
     const handleImageUpload = (file, num) => {
         if (!file) return;
@@ -43,7 +62,39 @@ const StylebendModal = ({ onClose, onApply }) => {
         setFrames([]);
 
         try {
+            // Simulated progress for Stylebend
+            const simulateProgress = () => {
+                setProgress(0);
+                setStatus('Analyzing images...');
+                
+                const interval = setInterval(() => {
+                    setProgress(prev => {
+                        if (prev >= 90) {
+                            clearInterval(interval);
+                            return 90;
+                        }
+                        if (prev < 20) {
+                            setStatus('Projecting into StyleGAN space...');
+                            return prev + 1;
+                        } else if (prev < 60) {
+                            setStatus('Optimizing latent vectors (this takes time)...');
+                            return prev + 0.5;
+                        } else {
+                            setStatus('Generating blended frames...');
+                            return prev + 0.2;
+                        }
+                    });
+                }, 500);
+                return interval;
+            };
+
+            const progressInterval = simulateProgress();
             const allFrames = await blendStyles(image1, image2, alpha, outpaint1, outpaint2);
+            clearInterval(progressInterval);
+            
+            setProgress(100);
+            setStatus('Done!');
+            
             setFrames(allFrames);
             const idx = Math.round(alpha * 20);
             setResultUrl(allFrames[Math.min(idx, allFrames.length - 1)]);
@@ -117,7 +168,7 @@ const StylebendModal = ({ onClose, onApply }) => {
                     checked={num === 1 ? outpaint1 : outpaint2}
                     onChange={e => num === 1 ? setOutpaint1(e.target.checked) : setOutpaint2(e.target.checked)}
                 />
-                🖼️ Normalize background
+                Normalize background
             </label>
             <p style={{ fontSize: '11px', color: '#9ca3af', marginTop: '4px' }}>
                 Removes background, places on white canvas for best StyleGAN results
@@ -129,7 +180,7 @@ const StylebendModal = ({ onClose, onApply }) => {
         <div className="clothify-modal-overlay">
             <div className="clothify-modal" style={{ maxWidth: '820px' }}>
                 <div className="clothify-modal-header">
-                    <div className="clothify-modal-title">👗 Stylebend — Fashion Blending</div>
+                    <div className="clothify-modal-title">Stylebend — Fashion Blending</div>
                     <button className="clothify-modal-close" onClick={onClose} disabled={isGenerating}>
                         <X size={20} />
                     </button>
@@ -138,7 +189,7 @@ const StylebendModal = ({ onClose, onApply }) => {
                 <div className="clothify-modal-body" style={{ padding: '24px', flexDirection: 'column', overflow: 'auto' }}>
                     {error && (
                         <div className="error-banner style-banner" style={{ marginBottom: '1rem', borderRadius: '8px' }}>
-                            ⚠️ {error}
+                            {error}
                         </div>
                     )}
 
@@ -182,10 +233,21 @@ const StylebendModal = ({ onClose, onApply }) => {
                     {isGenerating && (
                         <div className="clothify-preview-container" style={{ marginTop: '1.5rem', minHeight: '150px' }}>
                             <div className="clothify-loading">
-                                <div className="clothify-spinner"></div>
-                                <span className="clothify-loading-text">
-                                    Projecting & Generating Frames (~1–2 min)…
-                                </span>
+                                <div className="progress-container">
+                                    <div className="progress-header">
+                                        <span>{status || 'Blending styles...'}</span>
+                                        <span className="progress-percentage">{Math.round(progress)}%</span>
+                                    </div>
+                                    <div className="progress-track">
+                                        <div 
+                                            className="progress-bar" 
+                                            style={{ width: `${progress}%` }}
+                                        ></div>
+                                    </div>
+                                    <div className="progress-status">
+                                        Inversion takes a few minutes on CPU...
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     )}
@@ -217,7 +279,7 @@ const StylebendModal = ({ onClose, onApply }) => {
                         disabled={isGenerating || !image1 || !image2}
                         style={{
                             display: 'flex', alignItems: 'center', gap: '8px',
-                            background: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
+                            background: 'var(--btn-purple)',
                             opacity: (isGenerating || !image1 || !image2) ? 0.5 : 1
                         }}
                     >

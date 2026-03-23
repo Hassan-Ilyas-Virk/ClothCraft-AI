@@ -14,7 +14,9 @@ const LayersPanel = ({
     onClothify,
     onPatternMaker,
     onUpdateLayer,
-    onStylebend
+    onStylebend,
+    onStylebendFromLayer,
+    onGenerateHuman
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
 
@@ -137,38 +139,12 @@ const LayersPanel = ({
                                     onDelete={onDeleteLayer}
                                     onClothify={onClothify}
                                     onPatternMaker={onPatternMaker}
+                                    onStylebend={onStylebendFromLayer}
                                 />
                             </div>
                         )}
                     </>
                 )}
-            </div>
-
-            {/* Stylebend Trigger */}
-            <div className="layers-panel-footer" style={{ padding: '16px', borderTop: '1px solid #e5e7eb' }}>
-                <button
-                    onClick={onStylebend}
-                    className="stylebend-trigger-btn"
-                    style={{
-                        width: '100%',
-                        padding: '12px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '8px',
-                        background: 'linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '8px',
-                        cursor: 'pointer',
-                        fontWeight: '600',
-                        transition: 'all 0.2s ease',
-                        boxShadow: '0 4px 12px rgba(139, 92, 246, 0.3)'
-                    }}
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.38 3.46L16 2a4 4 0 0 1-8 0L3.62 3.46a2 2 0 0 0-1.34 2.23l.58 3.47a1 1 0 0 0 .99.84H6v10c0 1.1.9 2 2 2h8a2 2 0 0 0 2-2V10h2.15a1 1 0 0 0 .99-.84l.58-3.47a2 2 0 0 0-1.34-2.23z"></path></svg>
-                    Stylebend
-                </button>
             </div>
         </div>
     );

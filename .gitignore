@@ -56,10 +56,14 @@ logs/
 output.log
 
 # Model files (too large for git — download separately)
+models/
 model/*.safetensors
 model/*.pth
 model/*.ckpt
 model/*.pkl
+
+# Debug and temporary files
+debug_imports.py
 
 # rembg AI model cache (downloaded automatically at runtime)
 u2net/
