@@ -7,7 +7,8 @@ const MultiLayerCanvas = forwardRef(({
     brushSize,
     brushColor,
     activeTool,
-    onLayerUpdate
+    onLayerUpdate,
+    onCanvasSizeChange
 }, ref) => {
     const containerRef = useRef(null);
     const wrapperRef = useRef(null);
@@ -38,6 +39,7 @@ const MultiLayerCanvas = forwardRef(({
     const [selectionActive, setSelectionActive] = useState(false);
     // Whether Space is held for temporary pan
     const spaceHeld = useRef(false);
+    const pendingAutoFitRef = useRef(false);
 
     // Imperatively focus the text input after it mounts (autoFocus is unreliable inside mousedown handlers)
     useEffect(() => {
@@ -81,6 +83,31 @@ const MultiLayerCanvas = forwardRef(({
             }
         });
     }, [layers]);
+
+    useEffect(() => {
+        if (typeof onCanvasSizeChange === 'function') {
+            onCanvasSizeChange(canvasSize);
+        }
+    }, [canvasSize.width, canvasSize.height]);
+
+    // Run fit-to-screen only after canvasSize state has updated.
+    useEffect(() => {
+        if (!pendingAutoFitRef.current) return;
+        if (!containerRef.current) return;
+
+        const containerWidth = containerRef.current.clientWidth;
+        const containerHeight = containerRef.current.clientHeight;
+        if (!containerWidth || !containerHeight) return;
+
+        const scale = Math.min(
+            containerWidth / canvasSize.width,
+            containerHeight / canvasSize.height
+        ) * 0.9;
+
+        setViewScale(scale);
+        setViewOffset({ x: 0, y: 0 });
+        pendingAutoFitRef.current = false;
+    }, [canvasSize.width, canvasSize.height]);
 
     // Handle wheel zoom
     useEffect(() => {
@@ -1268,7 +1295,13 @@ const MultiLayerCanvas = forwardRef(({
 
             const img = new Image();
             img.onload = () => {
-                tCtx.drawImage(img, 0, 0, 100, 100);
+                tCtx.clearRect(0, 0, 100, 100);
+                const scale = Math.min(100 / img.width, 100 / img.height);
+                const drawW = img.width * scale;
+                const drawH = img.height * scale;
+                const drawX = (100 - drawW) / 2;
+                const drawY = (100 - drawH) / 2;
+                tCtx.drawImage(img, drawX, drawY, drawW, drawH);
                 const thumbnail = thumbnailCanvas.toDataURL('image/png');
                 onLayerUpdate(layerId, { thumbnail, canvasData: data, bounds });
             };
@@ -1395,7 +1428,8 @@ const MultiLayerCanvas = forwardRef(({
             }
         },
 
-        setCanvasSize: (width, height) => {
+        setCanvasSize: (width, height, autoFit = false) => {
+            pendingAutoFitRef.current = autoFit;
             setCanvasSize({ width, height });
         },
 
@@ -1455,7 +1489,7 @@ const MultiLayerCanvas = forwardRef(({
                             width={canvasSize.width}
                             height={canvasSize.height}
                             style={{
-                                opacity: layer.visible ? (layer.opacity || 1.0) : 0,
+                                opacity: layer.visible ? (layer.opacity ?? 1.0) : 0,
                                 mixBlendMode: layer.blendMode || 'normal',
                                 pointerEvents: layer.id === activeLayerId && !layer.locked ? 'auto' : 'none',
                                 transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
