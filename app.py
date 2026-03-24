@@ -4,7 +4,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
-from PIL import Image
+from PIL import Image, ImageChops, ImageFilter
 from torchvision import transforms
 import os
 import base64
@@ -24,7 +24,7 @@ from scripts.blending import blend_latents
 
 # --- 1. CONFIGURATION ---
 # Pix2Pix model for doodle translation
-MODEL_PATH = os.path.join(script_dir, 'model', 'pix2pix.pth')
+MODEL_PATH = os.path.join(script_dir, 'models', 'pix2pix.pth')
 INPUT_NC = 3
 OUTPUT_NC = 3
 NGF = 64
@@ -32,12 +32,17 @@ NORM_LAYER = torch.nn.BatchNorm2d
 USE_DROPOUT = True
 
 # Stable Diffusion model for inpainting
-SD_MODEL_PATH = os.path.join(script_dir, 'model', 'v1-5-pruned-emaonly.safetensors')
+SD_MODEL_PATH = os.path.join(script_dir, 'models', 'realisticVisionV60B1_v51VAE.safetensors')
 
 # StyleGAN model for style blending
-STYLEGAN_MODEL_PATH = os.path.join(script_dir, 'model', 'stylegan_human_v2_1024.pkl')
+STYLEGAN_MODEL_PATH = os.path.join(script_dir, 'models', 'stylegan_human_v2_1024.pkl')
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
 print(f"Using device: {device}")
 
 # --- 2. INITIALIZE FASTAPI APP AND LOAD MODELS ---
@@ -69,7 +74,7 @@ try:
     print("Loading Stable Diffusion Inpainting model...")
     sd_pipe = StableDiffusionInpaintPipeline.from_single_file(
         SD_MODEL_PATH,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        torch_dtype=torch.float16 if device in ["cuda", "mps"] else torch.float32,
         safety_checker=None
     ).to(device)
     print("✅ Stable Diffusion model loaded successfully!")
@@ -105,8 +110,20 @@ transform = transforms.Compose([
 def translate_doodle(doodle_bytes):
     """Translates doodle using Pix2Pix model"""
     print("🎨 Running Pix2Pix doodle translation...")
-    image = Image.open(io.BytesIO(doodle_bytes)).convert('RGB')
-    input_tensor = transform(image).unsqueeze(0)
+    
+    # Load original image
+    original = Image.open(io.BytesIO(doodle_bytes))
+    
+    # If image has an alpha channel, composite it onto a WHITE background
+    # This is CRITICAL because the Pix2Pix model was trained on white-background sketches.
+    # PIL's default .convert('RGB') makes transparent areas BLACK, which the model doesn't understand.
+    if original.mode == 'RGBA':
+        image = Image.new("RGB", original.size, (255, 255, 255))
+        image.paste(original, mask=original.split()[3])
+    else:
+        image = original.convert('RGB')
+        
+    input_tensor = transform(image).unsqueeze(0).to(device)
 
     with torch.no_grad():
         output_tensor = pix2pix_model(input_tensor)
@@ -117,6 +134,30 @@ def translate_doodle(doodle_bytes):
     
     # Convert tensor back to a PIL Image
     output_image = transforms.ToPILImage()(output_image)
+
+    # --- POST-PROCESSING ---
+    # The Pix2Pix model often produces a light gray background [~180, 180, 180].
+    # The frontend expects a BLACK background to correctly composite the result.
+    # We use rembg to remove the gray background and place the object on black.
+    try:
+        from rembg import remove as rembg_remove
+        print("   🪄 Removing Pix2Pix background using rembg...")
+        
+        # Convert to PNG bytes for rembg
+        temp_io = io.BytesIO()
+        output_image.save(temp_io, format="PNG")
+        
+        # Remove background
+        result_bytes = rembg_remove(temp_io.getvalue())
+        output_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
+        
+        # Composite onto BLACK background (required by frontend skip-black logic)
+        black_bg = Image.new("RGBA", output_rgba.size, (0, 0, 0, 255))
+        black_bg.paste(output_rgba, mask=output_rgba.split()[3])
+        output_image = black_bg.convert("RGB")
+        print("   ✅ Background cleanup complete.")
+    except Exception as e:
+        print(f"   ⚠️ Background cleanup failed ({e}) — returning raw model output.")
 
     # Save image to a byte buffer to send as response
     byte_io = io.BytesIO()
@@ -130,14 +171,23 @@ def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", 
     if sd_pipe is None:
         raise Exception("Stable Diffusion model not loaded")
     
-    # Load reference image and mask
-    reference_image = Image.open(io.BytesIO(reference_image_bytes)).convert('RGB')
+    # Load reference image with Alpha channel
+    original_rgba = Image.open(io.BytesIO(reference_image_bytes)).convert('RGBA')
+    
+    # Composite onto pure white background so SD doesn't see black voids
+    reference_image = Image.new("RGB", original_rgba.size, (255, 255, 255))
+    reference_image.paste(original_rgba, mask=original_rgba.split()[3])
+
     mask_image = Image.open(io.BytesIO(mask_bytes)).convert('L')  # Grayscale mask
     
     # Resize to optimal size for SD (512x512 recommended)
     original_size = reference_image.size
     reference_image = reference_image.resize((512, 512), Image.LANCZOS)
-    mask_image = mask_image.resize((512, 512), Image.LANCZOS)
+    
+    # Resize mask with BILINEAR (LANCZOS can create ringing on masks)
+    # Then apply a slight Gaussian blur to smooth the transition for the AI
+    mask_image = mask_image.resize((512, 512), Image.BILINEAR)
+    mask_image = mask_image.filter(ImageFilter.GaussianBlur(radius=4))
     
     # Use prompt directly without forcing clothing/fabric keywords
     enhanced_prompt = prompt if prompt else "high quality, detailed"
@@ -160,8 +210,9 @@ def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", 
         guidance_scale=7.5,
     ).images[0]
     
-    # Resize back to original size
-    result = result.resize(original_size, Image.LANCZOS)
+    # Resize back to original size and restore the original alpha channel (background cutout)
+    result = result.resize(original_size, Image.LANCZOS).convert('RGBA')
+    result.putalpha(original_rgba.split()[3])
     
     # Save to byte buffer
     byte_io = io.BytesIO()
@@ -207,7 +258,7 @@ def outpaint_to_full_body(img_pil):
         print("   ✅ Background removed successfully.")
     except ImportError:
         print("   ⚠️ rembg not installed — using background-fill fallback.")
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         print(f"   ⚠️ rembg failed ({e}) — using background-fill fallback.")
 
     # ---------------------------------------------------------------
@@ -383,10 +434,105 @@ async def blend_styles(
         print(f"Error blending styles: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Route for Text-to-Human generation
+@app.post('/generate-human')
+async def generate_human_endpoint(
+    prompt: str = Form('a fashion model wearing stylish clothing, full body, high quality, detailed'),
+    negative_prompt: str = Form('low quality, blurry, distorted, deformed, bad anatomy, extra limbs, ugly'),
+    steps: str = Form('50'),
+    guidance: str = Form('7.5'),
+):
+    """Generates a human figure from a text prompt using Stable Diffusion"""
+    if sd_pipe is None:
+        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
+
+    prompt = prompt + ", pure white background, white backdrop, clean studio"
+    negative_prompt = negative_prompt + ", complex background, messy background, outdoors, scenery, landscape"
+
+    print(f"🧑 Starting Text-to-Human Generation...")
+    print(f"📝 Prompt: {prompt}")
+    print(f"🚫 Negative: {negative_prompt}")
+
+    try:
+        # Create a blank white canvas — SD inpainting will replace everything
+        width, height = 512, 768
+        blank_image = Image.new("RGB", (width, height), (255, 255, 255))
+        mask_image = Image.new("L", (width, height), 255)  # All-white mask = generate everywhere
+
+        result = sd_pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=blank_image,
+            mask_image=mask_image,
+            strength=1.0,              # Full generation from noise
+            num_inference_steps=int(steps),
+            guidance_scale=float(guidance),
+        ).images[0]
+
+        # Try to remove the background
+        try:
+            from rembg import remove as rembg_remove
+            print("   🪄 Removing background using rembg...")
+            img_bytes_io = io.BytesIO()
+            result.save(img_bytes_io, format="PNG")
+            result_bytes = rembg_remove(img_bytes_io.getvalue())
+            result = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
+            print("   ✅ Background removed successfully.")
+        except Exception as e:
+            print(f"   ⚠️ Background removal failed or not installed ({e}) — keeping original background.")
+
+        # Return as PNG
+        byte_io = io.BytesIO()
+        result.save(byte_io, 'PNG')
+        byte_io.seek(0)
+
+        print("✅ Human generation complete!")
+        return StreamingResponse(byte_io, media_type='image/png')
+    except Exception as e:
+        print(f"Error generating human: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Route for AI Color Suggestions
+@app.post('/suggest-colors')
+async def suggest_colors_endpoint(prompt: str = Form(...)):
+    """Suggests a color palette from a text prompt using low-step Stable Diffusion"""
+    if sd_pipe is None:
+        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
+    
+    print(f"🎨 Suggesting colors for: {prompt}")
+    
+    try:
+        # Create a small blank canvas for speed
+        width, height = 256, 256
+        blank_image = Image.new("RGB", (width, height), (255, 255, 255))
+        mask_image = Image.new("L", (width, height), 255)
+        
+        # Guide towards abstract color blobs
+        enhanced_prompt = f"abstract color palette study, vibrant color blobs, {prompt}, high quality"
+        
+        # Low steps for fast "vibe" generation
+        result = sd_pipe(
+            prompt=enhanced_prompt,
+            image=blank_image,
+            mask_image=mask_image,
+            strength=1.0,
+            num_inference_steps=2, 
+            guidance_scale=7.5,
+        ).images[0]
+        
+        byte_io = io.BytesIO()
+        result.save(byte_io, 'PNG')
+        byte_io.seek(0)
+        
+        return StreamingResponse(byte_io, media_type='image/png')
+    except Exception as e:
+        print(f"Error suggesting colors: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # --- 4. RUN THE APP ---
 if __name__ == '__main__':
     print("\n🚀 Starting FastAPI server...")
-    print("Docs:          http://127.0.0.1:5000/docs")
-    print("API endpoint:  http://127.0.0.1:5000/predict")
+    print("Docs:          http://127.0.0.1:5001/docs")
+    print("API endpoint:  http://127.0.0.1:5001/predict")
     print("React frontend should run on http://localhost:5173")
-    uvicorn.run(app, host='0.0.0.0', port=5000)
+    uvicorn.run(app, host='0.0.0.0', port=5001)

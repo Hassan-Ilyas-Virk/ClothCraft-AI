@@ -1,12 +1,12 @@
 import React from 'react';
 import './BrushControls.css';
 
-const BrushControls = ({ brushSize, onBrushSizeChange, brushColor, visible }) => {
+const BrushControls = ({ brushSize, onBrushSizeChange, brushColor, visible, toolName = 'Brush' }) => {
     return (
         <div className={`brush-controls-panel ${visible ? 'visible' : ''}`}>
             <div className="brush-control-group">
                 <div className="brush-control-label">
-                    <span>Brush Size</span>
+                    <span>{toolName} Size</span>
                     <span className="brush-control-value">{brushSize}px</span>
                 </div>
                 <div className="brush-size-slider">

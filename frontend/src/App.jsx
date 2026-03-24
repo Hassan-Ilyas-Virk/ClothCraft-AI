@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Sparkles, X, ImagePlus, SlidersHorizontal, ChevronLeft, PenLine } from 'lucide-react';
+import { Upload, Sparkles, X, ImagePlus, SlidersHorizontal, ChevronLeft, PenLine, Home } from 'lucide-react';
 import { getUser, login as authLogin, signup as authSignup, logout as authLogout } from './services/auth';
 import * as projectService from './services/projects';
 import LoginPage from './pages/LoginPage';
@@ -13,7 +13,9 @@ import ClothifyModal from './components/ClothifyModal';
 import PatternMakerModal from './components/PatternMakerModal';
 import MoodboardModal from './components/MoodboardModal';
 import StylebendModal from './components/StylebendModal';
+import GenerateHumanModal from './components/GenerateHumanModal';
 import BrushControls from './components/BrushControls';
+import ClothCraftLogo from './components/ClothCraftLogo';
 import { useLayerManager } from './hooks/useLayerManager';
 import {
     translateDoodle,
@@ -52,11 +54,16 @@ function App() {
     const [activeTool, setActiveTool] = useState('brush');
     const [previousTool, setPreviousTool] = useState(null); // For spacebar panning
     const [brushSize, setBrushSize] = useState(5);
+    const [eraserSize, setEraserSize] = useState(20);
     const [brushColor, setBrushColor] = useState('#000000');
     const [clothifyLayer, setClothifyLayer] = useState(null);
     const [patternLayer, setPatternLayer] = useState(null);
     const [showMoodboard, setShowMoodboard] = useState(false);
     const [showStylebend, setShowStylebend] = useState(false);
+    const [stylebendInitialImage, setStylebendInitialImage] = useState(null);
+    const [clothifyProgress, setClothifyProgress] = useState(0);
+    const [clothifyStatus, setClothifyStatus] = useState('');
+    const [showGenerateHuman, setShowGenerateHuman] = useState(false);
     const [moodboardColors, setMoodboardColors] = useState([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState(null);
@@ -66,6 +73,11 @@ function App() {
         const handleKeyDown = (e) => {
             // Disable if Clothify modal is open
             if (clothifyLayer || patternLayer) return;
+
+            if (e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.metaKey) {
+                e.preventDefault();
+                canvasRef.current?.fitToScreen();
+            }
 
             if (e.code === 'Space' && !e.repeat && activeTool !== 'pan') {
                 e.preventDefault(); // Prevent scrolling
@@ -174,7 +186,21 @@ function App() {
         setCurrentView('canvas');
     };
     const handleOpenProject = (proj) => {
+        const { layers: projLayers, activeLayerId: projActiveId, name, canvasWidth, canvasHeight } = proj;
         setCurrentProject(proj);
+        setCanvasName(name);
+        loadAllLayers(projLayers || [], projActiveId || null);
+        
+        // Use a small timeout to ensure the canvas is mounted before fitting
+        setTimeout(() => {
+            if (canvasRef.current) {
+                if (canvasWidth && canvasHeight) {
+                    canvasRef.current.setCanvasSize(canvasWidth, canvasHeight);
+                }
+                canvasRef.current.fitToScreen();
+            }
+        }, 100);
+        
         setCurrentView('canvas');
     };
     const handleDeleteProject = (projectId) => {
@@ -263,10 +289,14 @@ function App() {
     // Handle generating preview in Clothify modal
     const handleGenerateClothify = async ({ layerId, prompt, blendStrength }) => {
         try {
+            setClothifyProgress(0);
+            setClothifyStatus('Preparing layers...');
             setIsProcessing(true);
             console.log('🎨 Starting Clothify generation...');
 
             // Get the drawing layer blob
+            setClothifyProgress(10);
+            setClothifyStatus('Processing drawing...');
             const doodleBlob = await canvasRef.current.getLayerBlob(layerId);
 
             // Get the reference layer blob
@@ -274,10 +304,14 @@ function App() {
             const referenceBlob = await canvasRef.current.getLayerBlob(referenceLayer.id);
 
             // Step 1: Translate doodle with Pix2Pix
+            setClothifyProgress(20);
+            setClothifyStatus('Translating design with Pix2Pix...');
             console.log('   Step 1: Translating doodle with Pix2Pix');
             const translatedDoodleBlob = await translateDoodle(doodleBlob);
 
             // Step 2: Composite translated doodle onto reference
+            setClothifyProgress(45);
+            setClothifyStatus('Compositing onto reference...');
             console.log('   Step 2: Compositing onto reference');
             const compositedImageBlob = await compositeTranslatedDoodleOnReference(
                 referenceBlob,
@@ -287,6 +321,8 @@ function App() {
 
             // If blend strength is 0, skip Stable Diffusion and return composited result
             if (blendStrength === 0) {
+                setClothifyProgress(100);
+                setClothifyStatus('Done!');
                 console.log('   ⏭️ Skipping Stable Diffusion (blend strength = 0)');
                 console.log('   ✅ Returning Pix2Pix result only');
 
@@ -300,10 +336,14 @@ function App() {
             }
 
             // Step 3: Create mask from doodle
+            setClothifyProgress(60);
+            setClothifyStatus('Creating mask...');
             console.log('   Step 3: Creating mask');
             const maskBlob = await createMaskFromDoodle(doodleBlob, blendStrength);
 
             // Step 4: Inpaint with Stable Diffusion
+            setClothifyProgress(75);
+            setClothifyStatus('Applying AI refinement...');
             console.log('   Step 4: Inpainting with Stable Diffusion');
             const inpaintedResultBlob = await inpaintWithStableDiffusion(
                 compositedImageBlob,
@@ -311,6 +351,9 @@ function App() {
                 prompt,
                 blendStrength
             );
+            
+            setClothifyProgress(100);
+            setClothifyStatus('Done!');
 
             // Convert blob to data URL for preview
             const reader = new FileReader();
@@ -338,7 +381,21 @@ function App() {
 
             // Update reference layer with the result
             const referenceLayer = getReferenceLayer();
-            await canvasRef.current.loadImageToLayer(referenceLayer.id, blob);
+            
+            // We use a small timeout to let the UI settle before the canvas operation
+            // This ensures the internal canvas state is ready for drawing
+            setTimeout(async () => {
+                if (canvasRef.current) {
+                    await canvasRef.current.loadImageToLayer(referenceLayer.id, blob);
+                    
+                    // Force a re-render of the thumbnail and canvas state by giving it a fresh object URL
+                    const freshUrl = URL.createObjectURL(blob);
+                    updateLayer(referenceLayer.id, {
+                        canvasData: freshUrl,
+                        thumbnail: freshUrl
+                    });
+                }
+            }, 50);
 
             // Remove the drawing layer
             removeLayer(layerId);
@@ -422,6 +479,51 @@ function App() {
         }
     };
 
+    const handleApplyGenerateHuman = async (resultUrl) => {
+        try {
+            // Fetch the generated AI image to get a blob
+            const res = await fetch(resultUrl);
+            const blob = await res.blob();
+            
+            if (layers.length === 0) {
+                // If this is the first action, set as Reference Layer
+                const refLayer = addLayer('reference', 'Generated Human');
+                const objectUrl = URL.createObjectURL(blob);
+                
+                // Wait for the new canvas instance to attach to the DOM
+                setTimeout(async () => {
+                    if (canvasRef.current) {
+                        await canvasRef.current.loadImageToLayer(refLayer.id, blob, true);
+                        // Manually trigger the canvasData update since the canvas size shifted
+                        updateLayer(refLayer.id, {
+                            canvasData: objectUrl,
+                            thumbnail: objectUrl
+                        });
+                    }
+                }, 50);
+            } else {
+                // Otherwise normal drawing layer
+                const objectUrl = URL.createObjectURL(blob);
+                const newLayer = addLayer('drawing', `Generated Human`);
+                updateLayer(newLayer.id, {
+                    canvasData: objectUrl,
+                    thumbnail: objectUrl
+                });
+            }
+
+            console.log('✅ Generated Human applied');
+        } catch (err) {
+            console.error('Error applying Generated Human:', err);
+            setError('Failed to apply Generated Human image to canvas');
+        }
+    };
+
+    const handleStylebendFromLayer = (layer) => {
+        const initialBlobUrl = layer.canvasData || layer.thumbnail;
+        setStylebendInitialImage(initialBlobUrl);
+        setShowStylebend(true);
+    };
+
     // ── Conditional routing renders ────────────────────────────────────
     if (currentView === 'loading') return null;
     if (currentView === 'login') return (
@@ -438,69 +540,31 @@ function App() {
             onLogout={handleLogout}
         />
     );
-    // ── Canvas view ────────────────────────────────────────────────────
+    
     return (
         <div className="app">
-            {/* Top Header */}
-            <header className="app-header">
-                {/* Left: back + brand */}
-                <div className="app-header-left">
-                    <button className="app-back-btn" onClick={handleBackToHome} title="Back to Home">
-                        <ChevronLeft size={17} />
-                        <span>Home</span>
-                    </button>
-                    <div className="app-header-logo">
-                        <Sparkles size={16} strokeWidth={1.5} />
-                    </div>
-                </div>
-
-                {/* Center: editable project name */}
-                <div className="app-name-area">
-                    {nameEditing ? (
-                        <input
-                            ref={canvasNameInputRef}
-                            className="app-name-input"
-                            value={canvasName}
-                            onChange={e => setCanvasName(e.target.value)}
-                            onBlur={handleNameCommit}
-                            onKeyDown={e => {
-                                if (e.key === 'Enter')  { e.target.blur(); }
-                                if (e.key === 'Escape') { setNameEditing(false); }
-                                e.stopPropagation();
-                            }}
-                        />
-                    ) : (
-                        <button
-                            className="app-name-display"
-                            onClick={() => setNameEditing(true)}
-                            title="Click to rename"
-                        >
-                            {canvasName}
-                            <PenLine size={12} />
-                        </button>
-                    )}
-                </div>
-
-                {/* Right: upload */}
-                <div className="header-controls">
-                    <input
-                        type="file"
-                        id="imageUpload"
-                        accept="image/*"
-                        onChange={handleImageUpload}
-                        disabled={isProcessing}
-                        style={{ display: 'none' }}
+            {/* Left Sidebar Column */}
+            <div className="toolbar-column">
+                <button className="app-back-btn home-sidebar-btn glass-panel" onClick={handleBackToHome} title="Back to Home">
+                    <ClothCraftLogo size={40} color="black" />
+                </button>
+                
+                {layers.length > 0 && (
+                    <Toolbar
+                        activeTool={activeTool}
+                        onToolChange={setActiveTool}
+                        brushColor={brushColor}
+                        onColorChange={setBrushColor}
+                        moodboardColors={moodboardColors}
+                        onOpenMoodboard={handleOpenMoodboard}
+                        disabled={isProcessing || !activeLayerId}
                     />
-                    <label htmlFor="imageUpload" className="upload-btn">
-                        <Upload size={16} style={{ display: 'inline', marginRight: '6px', verticalAlign: 'middle' }} />
-                        Upload Reference
-                    </label>
-                </div>
-            </header>
+                )}
+            </div>
 
             {error && (
                 <div className="error-banner">
-                    ⚠️ {error}
+                    {error}
                     <button onClick={() => setError(null)}>
                         <X size={18} />
                     </button>
@@ -509,24 +573,22 @@ function App() {
 
             {/* Main Content Area */}
             <div className="app-main">
-                {/* Left Toolbar */}
-                <Toolbar
-                    activeTool={activeTool}
-                    onToolChange={setActiveTool}
-                    brushColor={brushColor}
-                    onColorChange={setBrushColor}
-                    moodboardColors={moodboardColors}
-                    onOpenMoodboard={handleOpenMoodboard}
-                    disabled={isProcessing || !activeLayerId}
-                />
-
                 {/* Brush Controls */}
-                <BrushControls
-                    brushSize={brushSize}
-                    onBrushSizeChange={setBrushSize}
-                    brushColor={brushColor}
-                    visible={activeTool === 'brush' && activeLayerId !== null}
-                />
+                {layers.length > 0 && (
+                    <BrushControls
+                        brushSize={activeTool === 'eraser' ? eraserSize : brushSize}
+                        onBrushSizeChange={(newSize) => {
+                            if (activeTool === 'eraser') {
+                                setEraserSize(newSize);
+                            } else {
+                                setBrushSize(newSize);
+                            }
+                        }}
+                        brushColor={activeTool === 'eraser' ? '#ffffff' : brushColor}
+                        visible={activeTool === 'brush' || activeTool === 'eraser'}
+                        toolName={activeTool === 'eraser' ? 'Eraser' : 'Brush'}
+                    />
+                )}
 
                 {/* Center Canvas */}
                 <div className="app-canvas-area">
@@ -542,34 +604,54 @@ function App() {
                         />
                     ) : (
                         <div className="empty-state">
+                            <input
+                                type="file"
+                                id="imageUpload"
+                                accept="image/*"
+                                onChange={handleImageUpload}
+                                style={{ display: 'none' }}
+                            />
                             <div className="empty-state-icon">
-                                <ImagePlus size={80} strokeWidth={1.5} color="#d1d5db" />
+                                <ImagePlus size={100} strokeWidth={1} color="rgba(255,255,255,0.1)" />
                             </div>
                             <div className="empty-state-text">
-                                Upload a reference image to get started
+                                Start your project with a human base
                             </div>
-                            <label htmlFor="imageUpload" className="empty-state-btn">
-                                <Upload size={16} style={{ display: 'inline', marginRight: '6px', verticalAlign: 'middle' }} />
-                                Upload Image
-                            </label>
+                            <div style={{ display: 'flex', gap: '20px', marginTop: '32px' }}>
+                                <label htmlFor="imageUpload" className="empty-state-btn primary">
+                                    <Upload size={18} />
+                                    Upload Reference
+                                </label>
+                                <button className="empty-state-btn secondary" onClick={() => setShowGenerateHuman(true)}>
+                                    <Sparkles size={18} />
+                                    AI Generate
+                                </button>
+                            </div>
                         </div>
                     )}
                 </div>
 
                 {/* Right Layers Panel */}
-                <LayersPanel
-                    layers={layers}
-                    activeLayerId={activeLayerId}
-                    onLayerSelect={handleLayerSelect}
-                    onAddLayer={handleAddLayer}
-                    onToggleVisibility={toggleLayerVisibility}
-                    onToggleLock={toggleLayerLock}
-                    onDeleteLayer={removeLayer}
-                    onClothify={handleClothify}
-                    onPatternMaker={handlePatternMaker}
-                    onUpdateLayer={updateLayer}
-                    onStylebend={() => setShowStylebend(true)}
-                />
+                {layers.length > 0 && (
+                    <LayersPanel
+                        layers={layers}
+                        activeLayerId={activeLayerId}
+                        onLayerSelect={handleLayerSelect}
+                        onAddLayer={handleAddLayer}
+                        onToggleVisibility={toggleLayerVisibility}
+                        onToggleLock={toggleLayerLock}
+                        onDeleteLayer={removeLayer}
+                        onClothify={handleClothify}
+                        onPatternMaker={handlePatternMaker}
+                        onUpdateLayer={updateLayer}
+                        onStylebend={() => {
+                            setStylebendInitialImage(null);
+                            setShowStylebend(true);
+                        }}
+                        onStylebendFromLayer={handleStylebendFromLayer}
+                        onGenerateHuman={() => setShowGenerateHuman(true)}
+                    />
+                )}
             </div >
 
             {/* Clothify Modal */}
@@ -580,6 +662,8 @@ function App() {
                         onClose={handleCloseClothify}
                         onApply={handleApplyClothify}
                         onGenerate={handleGenerateClothify}
+                        progress={clothifyProgress}
+                        status={clothifyStatus}
                     />
                 )
             }
@@ -612,6 +696,17 @@ function App() {
                     <StylebendModal
                         onClose={() => setShowStylebend(false)}
                         onApply={handleApplyStylebend}
+                        initialImage1Url={stylebendInitialImage}
+                    />
+                )
+            }
+
+            {/* Generate Human Modal */}
+            {
+                showGenerateHuman && (
+                    <GenerateHumanModal
+                        onClose={() => setShowGenerateHuman(false)}
+                        onApply={handleApplyGenerateHuman}
                     />
                 )
             }

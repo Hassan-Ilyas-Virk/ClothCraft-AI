@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
+import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle, useCallback } from 'react';
 import './DrawingCanvas.css';
 
 const MultiLayerCanvas = forwardRef(({
@@ -1378,6 +1378,21 @@ const MultiLayerCanvas = forwardRef(({
                 };
                 img.src = url;
             });
+        },
+
+        fitToScreen: () => {
+            if (containerRef.current) {
+                const containerWidth = containerRef.current.clientWidth;
+                const containerHeight = containerRef.current.clientHeight;
+                
+                const scale = Math.min(
+                    containerWidth / canvasSize.width,
+                    containerHeight / canvasSize.height
+                ) * 0.9; // 90% fit
+                
+                setViewScale(scale);
+                setViewOffset({ x: 0, y: 0 }); // Center/Reset pan
+            }
         },
 
         setCanvasSize: (width, height) => {

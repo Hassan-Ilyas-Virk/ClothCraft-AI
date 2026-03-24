@@ -1,33 +1,24 @@
 .toolbar {
-  position: fixed;
-  left: 20px;
-  top: 80px;
   width: 64px;
-  /* Glassmorphism */
-  background: rgba(245, 240, 255, 0.75); /* Light purple tint */
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  /* Glassmorphism - Standardized */
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
   border-radius: 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
   padding: 16px 0;
   gap: 8px;
-  /* Glow & Shadow */
-  box-shadow: 
-    0 8px 32px rgba(31, 38, 135, 0.15),
-    0 0 0 1px rgba(255, 255, 255, 0.6) inset,
-    0 0 15px rgba(139, 92, 246, 0.3); /* Purple outer glow */
+  /* Glow & Shadow - Standardized with Glow */
+  box-shadow: var(--glass-shadow-glow);
   z-index: 1000;
   transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 .toolbar:hover {
-  box-shadow: 
-    0 12px 40px rgba(31, 38, 135, 0.2),
-    0 0 0 1px rgba(255, 255, 255, 0.8) inset,
-    0 0 20px rgba(139, 92, 246, 0.4); /* Stronger glow on hover */
+  box-shadow: var(--glass-shadow-glow-hover);
 }
 
 .toolbar-tool {

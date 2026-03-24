@@ -224,7 +224,7 @@ const PatternMakerModal = ({
             formData.append('prompt', elementPrompt);
             formData.append('strength', strength.toString());
 
-            const response = await fetch('http://127.0.0.1:5000/inpaint', {
+            const response = await fetch('http://127.0.0.1:5001/inpaint', {
                 method: 'POST',
                 body: formData
             });
@@ -286,7 +286,7 @@ const PatternMakerModal = ({
             <div className="pattern-modal">
                 <div className="pattern-modal-header">
                     <div className="pattern-modal-title">
-                        🎨 Pattern Maker - {layer.name}
+                        Pattern Maker - {layer.name}
                     </div>
                     <button className="pattern-modal-close" onClick={onClose}>✕</button>
                 </div>
@@ -451,7 +451,7 @@ const PatternMakerModal = ({
                                 disabled={isRefiningElement || isRefining}
                                 style={{ marginBottom: '1rem', backgroundColor: '#f3f4f6' }}
                             >
-                                {isRefiningElement ? '✨ Refining Element...' : '✨ Refine Single Element'}
+                                {isRefiningElement ? 'Refining Element...' : 'Refine Single Element'}
                             </button>
 
                             <button
@@ -459,7 +459,7 @@ const PatternMakerModal = ({
                                 onClick={handleRefine}
                                 disabled={isRefining || isRefiningElement}
                             >
-                                {isRefining ? '✨ Refining Pattern...' : '✨ Refine Full Pattern'}
+                                {isRefining ? 'Refining Pattern...' : 'Refine Full Pattern'}
                             </button>
                         </div>
                     </div>
@@ -497,7 +497,7 @@ const PatternMakerModal = ({
                                 onClick={() => setRefinedImage(null)}
                                 style={{ alignSelf: 'center' }}
                             >
-                                ↩️ Undo Refinement
+                                Undo Refinement
                             </button>
                         )}
                     </div>
@@ -508,7 +508,7 @@ const PatternMakerModal = ({
                         Cancel
                     </button>
                     <button className="pattern-btn pattern-btn-primary" onClick={handleApply}>
-                        ✓ Apply to Layer
+                        Apply to Layer
                     </button>
                 </div>
             </div>

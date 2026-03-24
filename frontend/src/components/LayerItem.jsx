@@ -11,17 +11,16 @@ const LayerItem = ({
     onToggleLock,
     onDelete,
     onClothify,
-    onPatternMaker
+    onPatternMaker,
+    onStylebend
 }) => {
     const [showContextMenu, setShowContextMenu] = useState(false);
     const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
 
     const handleContextMenu = (e) => {
         e.preventDefault();
-        if (layer.type === 'drawing') {
-            setContextMenuPos({ x: e.clientX, y: e.clientY });
-            setShowContextMenu(true);
-        }
+        setContextMenuPos({ x: e.clientX, y: e.clientY });
+        setShowContextMenu(true);
     };
 
     const handleClothify = () => {
@@ -129,26 +128,39 @@ const LayerItem = ({
                         top: `${contextMenuPos.y}px`,
                     }}
                 >
-                    <div className="layer-context-menu-item clothify" onClick={handleClothify}>
-                        <Sparkles size={16} /> Clothify
-                    </div>
-                    <div className="layer-context-menu-divider" />
-                    <div className="layer-context-menu-item" onClick={() => setShowContextMenu(false)}>
-                        <Edit size={16} /> Rename
-                    </div>
-                    <div className="layer-context-menu-item" onClick={() => setShowContextMenu(false)}>
-                        <Copy size={16} /> Duplicate
-                    </div>
-                    <div className="layer-context-menu-item" onClick={() => {
-                        setShowContextMenu(false);
-                        onPatternMaker && onPatternMaker(layer);
-                    }}>
-                        <Grid3x3 size={16} /> Pattern Maker
-                    </div>
-                    <div className="layer-context-menu-divider" />
-                    <div className="layer-context-menu-item" onClick={handleDelete}>
-                        <Trash2 size={16} /> Delete
-                    </div>
+                    {layer.type === 'reference' ? (
+                        <>
+                            <div className="layer-context-menu-item clothify" onClick={() => {
+                                setShowContextMenu(false);
+                                onStylebend && onStylebend(layer);
+                            }}>
+                                <Sparkles size={16} /> Stylebend Reference
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            <div className="layer-context-menu-item clothify" onClick={handleClothify}>
+                                <Sparkles size={16} /> Clothify
+                            </div>
+                            <div className="layer-context-menu-divider" />
+                            <div className="layer-context-menu-item" onClick={() => setShowContextMenu(false)}>
+                                <Edit size={16} /> Rename
+                            </div>
+                            <div className="layer-context-menu-item" onClick={() => setShowContextMenu(false)}>
+                                <Copy size={16} /> Duplicate
+                            </div>
+                            <div className="layer-context-menu-item" onClick={() => {
+                                setShowContextMenu(false);
+                                onPatternMaker && onPatternMaker(layer);
+                            }}>
+                                <Grid3x3 size={16} /> Pattern Maker
+                            </div>
+                            <div className="layer-context-menu-divider" />
+                            <div className="layer-context-menu-item" onClick={handleDelete}>
+                                <Trash2 size={16} /> Delete
+                            </div>
+                        </>
+                    )}
                 </div>,
                 document.body
             )}

@@ -32,7 +32,11 @@ except Exception:
 def resolve_device(preferred: Optional[str] = None) -> torch.device:
 	if preferred is not None:
 		return torch.device(preferred)
-	return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	if torch.cuda.is_available():
+		return torch.device("cuda")
+	if torch.backends.mps.is_available():
+		return torch.device("mps")
+	return torch.device("cpu")
 
 
 def load_model(model_path: str = "../model/stylegan_human_v2_1024.pkl", device: Optional[str] = None):

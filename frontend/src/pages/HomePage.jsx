@@ -17,6 +17,7 @@ import {
   PenLine, Clock, MoreVertical, ImageIcon
 } from 'lucide-react';
 import { formatProjectDate } from '../services/projects';
+import ClothCraftLogo from '../components/ClothCraftLogo';
 import './HomePage.css';
 
 /* ── Sub-components ─────────────────────────────────────────────────── */
@@ -156,7 +157,7 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
       <header className="hp-header">
         <div className="hp-header-brand">
           <div className="hp-header-logo">
-            <Sparkles size={18} strokeWidth={1.5} />
+            <ClothCraftLogo size={20} color="white" />
           </div>
           <span className="hp-header-title">ClothCraft AI</span>
         </div>

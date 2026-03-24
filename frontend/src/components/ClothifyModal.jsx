@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
 import './ClothifyModal.css';
+import './ProgressBar.css';
 
 const ClothifyModal = ({
     layer,
     onClose,
     onApply,
-    onGenerate
+    onGenerate,
+    progress,
+    status
 }) => {
     const [prompt, setPrompt] = useState('high quality, detailed, photorealistic clothing');
     const [blendStrength, setBlendStrength] = useState(0.75);
@@ -47,7 +50,7 @@ const ClothifyModal = ({
             <div className="clothify-modal">
                 <div className="clothify-modal-header">
                     <div className="clothify-modal-title">
-                        ✨ Clothify - {layer.name}
+                        Clothify - {layer.name}
                     </div>
                     <button className="clothify-modal-close" onClick={onClose}>
                         ✕
@@ -109,7 +112,6 @@ const ClothifyModal = ({
                                 />
                             ) : (
                                 <div className="clothify-preview-placeholder">
-                                    <div className="clothify-preview-placeholder-icon">🎨</div>
                                     <div className="clothify-preview-placeholder-text">
                                         Click "Generate" to create a preview
                                     </div>
@@ -118,9 +120,20 @@ const ClothifyModal = ({
 
                             {isGenerating && (
                                 <div className="clothify-loading">
-                                    <div className="clothify-spinner"></div>
-                                    <div className="clothify-loading-text">
-                                        Generating your design...
+                                    <div className="progress-container">
+                                        <div className="progress-header">
+                                            <span>{status || 'Generating...'}</span>
+                                            <span className="progress-percentage">{Math.round(progress || 0)}%</span>
+                                        </div>
+                                        <div className="progress-track">
+                                            <div 
+                                                className="progress-bar" 
+                                                style={{ width: `${progress}%` }}
+                                            ></div>
+                                        </div>
+                                        <div className="progress-status">
+                                            This may take a minute or two...
+                                        </div>
                                     </div>
                                 </div>
                             )}
@@ -132,7 +145,7 @@ const ClothifyModal = ({
                                 onClick={handleGenerate}
                                 disabled={isGenerating}
                             >
-                                {preview ? '🔄 Regenerate' : '✨ Generate'}
+                                {preview ? 'Regenerate' : 'Generate'}
                             </button>
                             {preview && (
                                 <button
@@ -140,7 +153,7 @@ const ClothifyModal = ({
                                     onClick={() => setPreview(null)}
                                     disabled={isGenerating}
                                 >
-                                    🗑️ Clear
+                                    Clear
                                 </button>
                             )}
                         </div>
@@ -159,7 +172,7 @@ const ClothifyModal = ({
                         onClick={handleApply}
                         disabled={!preview || isGenerating}
                     >
-                        ✓ Apply to Reference
+                        Apply to Reference
                     </button>
                 </div>
             </div>
