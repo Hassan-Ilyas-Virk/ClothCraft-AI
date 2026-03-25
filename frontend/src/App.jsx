@@ -36,6 +36,9 @@ function App() {
     const [canvasName,     setCanvasName]     = useState('Untitled Design');
     const [nameEditing,    setNameEditing]    = useState(false);
     const canvasNameInputRef                  = useRef(null);
+    const [canvasNameError, setCanvasNameError] = useState('');
+    const [savedCanvasSize, setSavedCanvasSize] = useState(null);
+    const [currentCanvasSize, setCurrentCanvasSize] = useState({ width: 1024, height: 1024 });
     // ───────────────────────────────────────────────────────────────────
 
     const {
@@ -47,6 +50,8 @@ function App() {
         updateLayer,
         toggleLayerVisibility,
         toggleLayerLock,
+        reorderLayers,
+        duplicateLayer,
         getReferenceLayer,
         loadAllLayers,
     } = useLayerManager();
@@ -67,16 +72,42 @@ function App() {
     const [moodboardColors, setMoodboardColors] = useState([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState(null);
+    const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
 
     // Handle Spacebar Pan (Photoshop style)
     useEffect(() => {
+        const isEditableTarget = (target) => {
+            if (!target) return false;
+            const tag = target.tagName;
+            return target.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+        };
+
         const handleKeyDown = (e) => {
+            if (currentView !== 'canvas') return;
+            if (isEditableTarget(e.target)) return;
+
             // Disable if Clothify modal is open
             if (clothifyLayer || patternLayer) return;
 
             if (e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.metaKey) {
                 e.preventDefault();
                 canvasRef.current?.fitToScreen();
+            }
+
+            const isUndoCombo = (e.ctrlKey || e.metaKey) && !e.altKey && e.code === 'KeyZ' && !e.shiftKey;
+            const isRedoCombo = ((e.ctrlKey || e.metaKey) && !e.altKey && e.code === 'KeyZ' && e.shiftKey)
+                || (e.ctrlKey && !e.metaKey && !e.altKey && e.code === 'KeyY');
+
+            if (isUndoCombo) {
+                e.preventDefault();
+                void canvasRef.current?.undoActiveLayer?.();
+                return;
+            }
+
+            if (isRedoCombo) {
+                e.preventDefault();
+                void canvasRef.current?.redoActiveLayer?.();
+                return;
             }
 
             if (e.code === 'Space' && !e.repeat && activeTool !== 'pan') {
@@ -87,6 +118,8 @@ function App() {
         };
 
         const handleKeyUp = (e) => {
+            if (currentView !== 'canvas') return;
+            if (isEditableTarget(e.target)) return;
             if (clothifyLayer || patternLayer) return;
 
             if (e.code === 'Space' && previousTool) {
@@ -103,19 +136,30 @@ function App() {
             window.removeEventListener('keydown', handleKeyDown);
             window.removeEventListener('keyup', handleKeyUp);
         };
-    }, [activeTool, previousTool, clothifyLayer]);
+    }, [activeTool, previousTool, clothifyLayer, patternLayer, currentView]);
 
     // ── Auth check on mount ────────────────────────────────────────────
     useEffect(() => {
-        const user = getUser();
-        if (user) { setCurrentUser(user); setCurrentView('home'); }
-        else      { setCurrentView('login'); }
+        const loadSession = async () => {
+            const user = await getUser();
+            if (user) { setCurrentUser(user); setCurrentView('home'); }
+            else      { setCurrentView('login'); }
+        };
+        void loadSession();
     }, []);
 
     // Refresh project list when arriving on the home view
     useEffect(() => {
         if (currentView === 'home' && currentUser) {
-            setUserProjects(projectService.getProjects(currentUser.id));
+            const loadProjects = async () => {
+                try {
+                    const projects = await projectService.getProjects();
+                    setUserProjects(projects);
+                } catch (err) {
+                    setError(err.message || 'Failed to load projects');
+                }
+            };
+            void loadProjects();
         }
     }, [currentView, currentUser]);
 
@@ -127,19 +171,45 @@ function App() {
             try {
                 const { layers: sl, activeLayerId: sa, canvasWidth: cw, canvasHeight: ch } = JSON.parse(currentProject.layersSnapshot);
                 loadAllLayers(sl, sa);
-                if (cw && ch) canvasRef.current?.setCanvasSize(cw, ch);
+                if (cw && ch) setSavedCanvasSize({ width: cw, height: ch });
+                else setSavedCanvasSize(null);
             } catch { loadAllLayers([], null); }
         } else {
             loadAllLayers([], null);
+            setSavedCanvasSize(null);
         }
     }, [currentProject?.id]);
+
+    // Apply saved canvas dimensions after canvas mounts/layers load.
+    useEffect(() => {
+        if (currentView !== 'canvas') return;
+        if (!canvasRef.current) return;
+        if (layers.length === 0) return;
+
+        if (savedCanvasSize) {
+            canvasRef.current.setCanvasSize(savedCanvasSize.width, savedCanvasSize.height, true);
+            return;
+        }
+
+        // Default framing for projects without stored dimensions.
+        requestAnimationFrame(() => {
+            canvasRef.current?.fitToScreen();
+        });
+    }, [currentView, savedCanvasSize, layers.length]);
 
     // Auto-save layers 3 s after the last change while on the canvas view
     useEffect(() => {
         if (currentView !== 'canvas' || !currentProject) return;
-        const tid = setTimeout(() => _saveProject(canvasName), 3000);
+        const tid = setTimeout(() => { void _saveProject(canvasName); }, 3000);
         return () => clearTimeout(tid);
     }, [layers]);
+
+    // Save canvas dimensions too, even when only size changes.
+    useEffect(() => {
+        if (currentView !== 'canvas' || !currentProject) return;
+        const tid = setTimeout(() => { void _saveProject(canvasName); }, 1200);
+        return () => clearTimeout(tid);
+    }, [currentCanvasSize.width, currentCanvasSize.height]);
 
     // Focus the canvas name input when editing starts
     useEffect(() => {
@@ -151,17 +221,17 @@ function App() {
 
     // ── Auth handlers ─────────────────────────────────────────────────
     const handleLogin = async (email, password) => {
-        const user = authLogin(email, password);   // throws on failure
+        const user = await authLogin(email, password);   // throws on failure
         setCurrentUser(user);
         setCurrentView('home');
     };
     const handleSignup = async (email, password, name) => {
-        const user = authSignup(email, password, name);
+        const user = await authSignup(email, password, name);
         setCurrentUser(user);
         setCurrentView('home');
     };
-    const handleLogout = () => {
-        authLogout();
+    const handleLogout = async () => {
+        await authLogout();
         setCurrentUser(null);
         setCurrentProject(null);
         loadAllLayers([], null);
@@ -170,58 +240,102 @@ function App() {
 
     // ── Project handlers ──────────────────────────────────────────────
     /** Internal: persist current state to storage */
-    const _saveProject = (nameOverride) => {
+    const _saveProject = async (nameOverride, options = {}) => {
+        const { showGlobalError = true } = options;
         if (!currentProject) return;
         const name = (nameOverride || canvasName || '').trim() || 'Untitled Design';
         const thumbnail = layers.find(l => l.thumbnail)?.thumbnail || null;
-        const { width: canvasWidth, height: canvasHeight } = canvasRef.current?.getCanvasSize() ?? { width: 1024, height: 1024 };
-        projectService.saveProject(currentProject.id, { name, thumbnail, layers, activeLayerId, canvasWidth, canvasHeight });
+        const canvasWidth = currentCanvasSize?.width || 1024;
+        const canvasHeight = currentCanvasSize?.height || 1024;
+        try {
+            await projectService.saveProject(currentProject.id, { name, thumbnail, layers, activeLayerId, canvasWidth, canvasHeight });
+        } catch (err) {
+            if (showGlobalError) {
+                setError(err.message || 'Failed to save project');
+            }
+            throw err;
+        }
     };
 
-    const handleNewProject = () => {
-        const proj = projectService.createProject(currentUser.id, 'Untitled Design');
-        setCurrentProject(proj);
-        setCanvasName(proj.name);
-        loadAllLayers([], null);
-        setCurrentView('canvas');
+    const handleNewProject = async () => {
+        try {
+            const proj = await projectService.createProject('Untitled Design');
+            setCurrentProject(proj);
+            setCanvasName(proj.name);
+            setSavedCanvasSize(null);
+            loadAllLayers([], null);
+            setCurrentView('canvas');
+        } catch (err) {
+            window.alert(err.message || 'Failed to create project');
+        }
     };
-    const handleOpenProject = (proj) => {
-        const { layers: projLayers, activeLayerId: projActiveId, name, canvasWidth, canvasHeight } = proj;
-        setCurrentProject(proj);
-        setCanvasName(name);
-        loadAllLayers(projLayers || [], projActiveId || null);
-        
-        // Use a small timeout to ensure the canvas is mounted before fitting
-        setTimeout(() => {
-            if (canvasRef.current) {
-                if (canvasWidth && canvasHeight) {
-                    canvasRef.current.setCanvasSize(canvasWidth, canvasHeight);
+
+    const getImageDimensions = (src) => new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve({ width: img.width, height: img.height });
+        img.onerror = () => resolve(null);
+        img.src = src;
+    });
+
+    const normalizeLegacySnapshotSize = async (snapshotRaw) => {
+        if (!snapshotRaw) return snapshotRaw;
+        try {
+            const parsed = JSON.parse(snapshotRaw);
+            const layersInSnapshot = parsed.layers || [];
+            const refLayer = layersInSnapshot.find((l) => l.type === 'reference' && l.canvasData);
+            if (refLayer) {
+                const dims = await getImageDimensions(refLayer.canvasData);
+                if (dims) {
+                    // Keep canvas locked to reference dimensions to prevent reopen drift.
+                    parsed.canvasWidth = dims.width;
+                    parsed.canvasHeight = dims.height;
                 }
-                canvasRef.current.fitToScreen();
+
+                // Reference layer should stay anchored on reopen.
+                refLayer.transform = { x: 0, y: 0, scale: 1, rotation: 0 };
             }
-        }, 100);
-        
+
+            return JSON.stringify(parsed);
+        } catch {
+            return snapshotRaw;
+        }
+    };
+
+    const handleOpenProject = async (proj) => {
+        const fullProject = await projectService.getProject(proj.id);
+        const fixedSnapshot = await normalizeLegacySnapshotSize(fullProject.layersSnapshot);
+        setCurrentProject({ ...fullProject, layersSnapshot: fixedSnapshot });
+        setCanvasName(fullProject.name);
         setCurrentView('canvas');
     };
-    const handleDeleteProject = (projectId) => {
-        projectService.deleteProject(projectId);
-        setUserProjects(projectService.getProjects(currentUser.id));
+    const handleDeleteProject = async (projectId) => {
+        await projectService.deleteProject(projectId);
+        const projects = await projectService.getProjects();
+        setUserProjects(projects);
     };
-    const handleRenameProject = (projectId, newName) => {
-        projectService.renameProject(projectId, newName);
-        setUserProjects(projectService.getProjects(currentUser.id));
+    const handleRenameProject = async (projectId, newName) => {
+        await projectService.renameProject(projectId, newName);
+        const projects = await projectService.getProjects();
+        setUserProjects(projects);
     };
-    const handleBackToHome = () => {
-        _saveProject();
+    const handleBackToHome = async () => {
+        await _saveProject();
         setCurrentView('home');
     };
 
     // ── Canvas name handlers ──────────────────────────────────────────
-    const handleNameCommit = () => {
+    const handleNameCommit = async () => {
         const trimmed = (canvasName || '').trim() || 'Untitled Design';
         setCanvasName(trimmed);
-        setNameEditing(false);
-        _saveProject(trimmed);
+        try {
+            await _saveProject(trimmed, { showGlobalError: false });
+            setCanvasNameError('');
+            setNameEditing(false);
+        } catch (err) {
+            setCanvasNameError(err.message || 'Name unavailable');
+            setNameEditing(true);
+            setTimeout(() => canvasNameInputRef.current?.focus(), 0);
+        }
     };
     // ──────────────────────────────────────────────────────────────────
 
@@ -274,6 +388,16 @@ function App() {
     // Handle layer update (thumbnail, canvas data)
     const handleLayerUpdate = (layerId, updates) => {
         updateLayer(layerId, updates);
+    };
+
+    const handleUndo = async () => {
+        if (!canvasRef.current) return;
+        await canvasRef.current.undoActiveLayer?.();
+    };
+
+    const handleRedo = async () => {
+        if (!canvasRef.current) return;
+        await canvasRef.current.redoActiveLayer?.();
     };
 
     // Handle opening Clothify modal
@@ -557,6 +681,10 @@ function App() {
                         onColorChange={setBrushColor}
                         moodboardColors={moodboardColors}
                         onOpenMoodboard={handleOpenMoodboard}
+                        onUndo={handleUndo}
+                        onRedo={handleRedo}
+                        canUndo={historyState.canUndo}
+                        canRedo={historyState.canRedo}
                         disabled={isProcessing || !activeLayerId}
                     />
                 )}
@@ -592,6 +720,43 @@ function App() {
 
                 {/* Center Canvas */}
                 <div className="app-canvas-area">
+                    {layers.length > 0 && (
+                        <div className="canvas-title-bar glass-panel">
+                            {nameEditing ? (
+                                <div className="canvas-title-edit-wrap">
+                                    <input
+                                        ref={canvasNameInputRef}
+                                        className="canvas-title-input"
+                                        value={canvasName}
+                                        onChange={(e) => {
+                                            setCanvasName(e.target.value);
+                                            if (canvasNameError) setCanvasNameError('');
+                                        }}
+                                        onBlur={() => { void handleNameCommit(); }}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') { e.preventDefault(); void handleNameCommit(); }
+                                            if (e.key === 'Escape') {
+                                                setNameEditing(false);
+                                                setCanvasNameError('');
+                                                setCanvasName(currentProject?.name || 'Untitled Design');
+                                            }
+                                        }}
+                                        maxLength={120}
+                                    />
+                                    {canvasNameError && <span className="canvas-title-error-tag">{canvasNameError}</span>}
+                                </div>
+                            ) : (
+                                <button
+                                    className="canvas-title-button"
+                                    onClick={() => { setCanvasNameError(''); setNameEditing(true); }}
+                                    title="Rename project"
+                                >
+                                    {canvasName || 'Untitled Design'}
+                                </button>
+                            )}
+                        </div>
+                    )}
+
                     {layers.length > 0 ? (
                         <MultiLayerCanvas
                             ref={canvasRef}
@@ -601,6 +766,8 @@ function App() {
                             brushColor={brushColor}
                             activeTool={activeTool}
                             onLayerUpdate={handleLayerUpdate}
+                            onCanvasSizeChange={setCurrentCanvasSize}
+                            onHistoryStateChange={setHistoryState}
                         />
                     ) : (
                         <div className="empty-state">
@@ -640,6 +807,8 @@ function App() {
                         onAddLayer={handleAddLayer}
                         onToggleVisibility={toggleLayerVisibility}
                         onToggleLock={toggleLayerLock}
+                        onReorderLayers={reorderLayers}
+                        onDuplicateLayer={duplicateLayer}
                         onDeleteLayer={removeLayer}
                         onClothify={handleClothify}
                         onPatternMaker={handlePatternMaker}

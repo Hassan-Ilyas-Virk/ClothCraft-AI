@@ -26,22 +26,42 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename }) => {
   const [menuOpen, setMenuOpen]     = useState(false);
   const [renaming, setRenaming]     = useState(false);
   const [nameVal, setNameVal]       = useState(project.name);
+  const [renameError, setRenameError] = useState('');
   const nameInputRef                = useRef(null);
 
   const startRename = () => {
     setMenuOpen(false);
     setRenaming(true);
+    setRenameError('');
     setTimeout(() => nameInputRef.current?.select(), 20);
   };
 
-  const commitRename = () => {
+  const commitRename = async () => {
     const trimmed = nameVal.trim();
-    if (trimmed && trimmed !== project.name) onRename(project.id, trimmed);
-    else setNameVal(project.name);
-    setRenaming(false);
+    if (!trimmed) {
+      setNameVal(project.name);
+      setRenaming(false);
+      setRenameError('');
+      return;
+    }
+    if (trimmed === project.name) {
+      setRenaming(false);
+      setRenameError('');
+      return;
+    }
+    try {
+      await onRename(project.id, trimmed);
+      setRenameError('');
+      setRenaming(false);
+    } catch (err) {
+      setRenameError(err?.message || 'Name unavailable');
+      setRenaming(true);
+      setTimeout(() => nameInputRef.current?.focus(), 0);
+    }
   };
 
   return (
+    <div className="hp-card-stack">
     <div className="hp-card" onClick={() => !renaming && !menuOpen && onOpen(project)}>
       {/* Thumbnail */}
       <div className="hp-card-thumb">
@@ -68,20 +88,22 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename }) => {
       <div className="hp-card-footer">
         <div className="hp-card-meta">
           {renaming ? (
-            <input
-              ref={nameInputRef}
-              className="hp-card-rename-input"
-              value={nameVal}
-              onChange={e => setNameVal(e.target.value)}
-              onBlur={commitRename}
-              onKeyDown={e => {
-                if (e.key === 'Enter') commitRename();
-                if (e.key === 'Escape') { setNameVal(project.name); setRenaming(false); }
-                e.stopPropagation();
-              }}
-              onClick={e => e.stopPropagation()}
-              autoFocus
-            />
+            <div className="hp-rename-wrap">
+              <input
+                ref={nameInputRef}
+                className="hp-card-rename-input"
+                value={nameVal}
+                onChange={e => { setNameVal(e.target.value); if (renameError) setRenameError(''); }}
+                onBlur={() => { void commitRename(); }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') { e.preventDefault(); void commitRename(); }
+                  if (e.key === 'Escape') { setNameVal(project.name); setRenaming(false); setRenameError(''); }
+                  e.stopPropagation();
+                }}
+                onClick={e => e.stopPropagation()}
+                autoFocus
+              />
+            </div>
           ) : (
             <span className="hp-card-name">{project.name}</span>
           )}
@@ -115,6 +137,8 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename }) => {
           )}
         </div>
       </div>
+    </div>
+    {renameError && <div className="hp-card-error-below">{renameError}</div>}
     </div>
   );
 };

@@ -78,8 +78,81 @@ export const useLayerManager = () => {
       if (hasReference && targetIndex === 0) return prev;
 
       const [movedLayer] = newLayers.splice(fromIndex, 1);
-      newLayers.splice(targetIndex, 0, movedLayer);
+      const insertionIndex = fromIndex < targetIndex ? targetIndex - 1 : targetIndex;
+      newLayers.splice(insertionIndex, 0, movedLayer);
       return newLayers;
+    });
+  }, []);
+
+  // Duplicate a layer and place the copy directly above the source layer
+  const duplicateLayer = useCallback((layerId) => {
+    setLayers((prev) => {
+      const sourceIndex = prev.findIndex((layer) => layer.id === layerId);
+      if (sourceIndex === -1) return prev;
+
+      const sourceLayer = prev[sourceIndex];
+      if (sourceLayer.type === 'reference') return prev;
+
+      const duplicated = {
+        ...sourceLayer,
+        id: `layer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        name: `${sourceLayer.name} Copy`,
+      };
+
+      const next = [...prev];
+      next.splice(sourceIndex + 1, 0, duplicated);
+      setActiveLayerId(duplicated.id);
+      return next;
+    });
+  }, []);
+
+  // Move a drawing layer one step up in stack order
+  const moveLayerUp = useCallback((layerId) => {
+    setLayers((prev) => {
+      const fromIndex = prev.findIndex((layer) => layer.id === layerId);
+      if (fromIndex === -1) return prev;
+
+      const fromLayer = prev[fromIndex];
+      if (fromLayer.type === 'reference') return prev;
+
+      let toIndex = -1;
+      for (let i = fromIndex + 1; i < prev.length; i += 1) {
+        if (prev[i].type !== 'reference') {
+          toIndex = i;
+          break;
+        }
+      }
+
+      if (toIndex === -1) return prev;
+
+      const next = [...prev];
+      [next[fromIndex], next[toIndex]] = [next[toIndex], next[fromIndex]];
+      return next;
+    });
+  }, []);
+
+  // Move a drawing layer one step down in stack order
+  const moveLayerDown = useCallback((layerId) => {
+    setLayers((prev) => {
+      const fromIndex = prev.findIndex((layer) => layer.id === layerId);
+      if (fromIndex === -1) return prev;
+
+      const fromLayer = prev[fromIndex];
+      if (fromLayer.type === 'reference') return prev;
+
+      let toIndex = -1;
+      for (let i = fromIndex - 1; i >= 0; i -= 1) {
+        if (prev[i].type !== 'reference') {
+          toIndex = i;
+          break;
+        }
+      }
+
+      if (toIndex === -1) return prev;
+
+      const next = [...prev];
+      [next[fromIndex], next[toIndex]] = [next[toIndex], next[fromIndex]];
+      return next;
     });
   }, []);
 
@@ -130,6 +203,9 @@ export const useLayerManager = () => {
     toggleLayerVisibility,
     toggleLayerLock,
     reorderLayers,
+    duplicateLayer,
+    moveLayerUp,
+    moveLayerDown,
     getActiveLayer,
     getReferenceLayer,
     getVisibleLayers,

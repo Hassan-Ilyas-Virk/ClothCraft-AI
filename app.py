@@ -1,18 +1,33 @@
 import torch
 import io
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel, Field, EmailStr
 import uvicorn
 from PIL import Image, ImageChops, ImageFilter
 from torchvision import transforms
 import os
 import base64
 import numpy as np
+import time
+import re
+from datetime import datetime, timezone, timedelta
+from contextlib import asynccontextmanager
+from typing import Optional, Any
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import DuplicateKeyError
+from bson import ObjectId
+from dotenv import load_dotenv
+from jose import jwt, JWTError
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, InvalidHash
 # IMPORTANT: This import requires the 'networks.py' file from the original
 # pix2pix repo to be in the same directory as this script.
 from networks import UnetGenerator
 script_dir = os.path.dirname(__file__)
+load_dotenv(os.path.join(script_dir, ".env"))
 
 import sys
 stylebend_path = os.path.join(script_dir, 'stylebend')
@@ -21,6 +36,189 @@ if stylebend_path not in sys.path:
 
 from scripts.inversion import load_model, project_image, resolve_device
 from scripts.blending import blend_latents
+
+
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI") or "mongodb://127.0.0.1:27017"
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME") or os.getenv("MONGO_DB_NAME") or "clothcraft_ai"
+MONGODB_REQUIRED = os.getenv("MONGODB_REQUIRED", "false").lower() == "true"
+MONGODB_CONNECT_TIMEOUT_MS = int(os.getenv("MONGODB_CONNECT_TIMEOUT_MS", "5000"))
+MONGODB_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if origin.strip()
+]
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-change-me")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
+AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "cc_auth")
+AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
+
+password_hasher = PasswordHasher()
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_timestamp_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def parse_object_id(raw_id: str) -> ObjectId:
+    try:
+        return ObjectId(raw_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid project id") from exc
+
+
+def serialize_project(doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(doc["_id"]),
+        "userId": doc["userId"],
+        "name": doc["name"],
+        "createdAt": doc["createdAt"],
+        "updatedAt": doc["updatedAt"],
+        "thumbnail": doc.get("thumbnail"),
+        "layersSnapshot": doc.get("layersSnapshot"),
+    }
+
+
+def serialize_user(doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(doc["_id"]),
+        "email": doc["email"],
+        "displayName": doc["displayName"],
+        "createdAt": doc["createdAt"],
+    }
+
+
+def normalize_project_name(name: str) -> str:
+    return " ".join(name.strip().lower().split())
+
+
+def build_name_conflict_filter(user_id: str, normalized_name: str, raw_name: str, exclude_id: Optional[ObjectId] = None) -> dict[str, Any]:
+    trimmed = raw_name.strip()
+    escaped = re.escape(trimmed)
+    conflict_filter: dict[str, Any] = {
+        "userId": user_id,
+        "$or": [
+            {"nameNormalized": normalized_name},
+            {"name": {"$regex": rf"^\s*{escaped}\s*$", "$options": "i"}},
+        ],
+    }
+    if exclude_id is not None:
+        conflict_filter["_id"] = {"$ne": exclude_id}
+    return conflict_filter
+
+
+def create_access_token(user_id: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES)
+    payload = {
+        "sub": user_id,
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite="lax",
+        max_age=JWT_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+
+
+def clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=AUTH_COOKIE_NAME,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+
+
+class MongoManager:
+    def __init__(self, uri: str, db_name: str, timeout_ms: int = 5000):
+        self.uri = uri
+        self.db_name = db_name
+        self.timeout_ms = timeout_ms
+        self.client: Optional[AsyncIOMotorClient] = None
+        self.db: Optional[AsyncIOMotorDatabase] = None
+
+    async def connect(self) -> None:
+        self.client = AsyncIOMotorClient(self.uri, serverSelectionTimeoutMS=self.timeout_ms)
+        await self.client.admin.command("ping")
+        self.db = self.client[self.db_name]
+        await self._ensure_indexes()
+
+    async def disconnect(self) -> None:
+        if self.client is not None:
+            self.client.close()
+        self.client = None
+        self.db = None
+
+    async def _ensure_indexes(self) -> None:
+        if self.db is None:
+            return
+        await self.db["users"].create_index([("email", ASCENDING)], unique=True)
+        await self.db["projects"].create_index([
+            ("userId", ASCENDING),
+            ("updatedAt", DESCENDING),
+        ])
+        await self.db["projects"].create_index([
+            ("userId", ASCENDING),
+            ("nameNormalized", ASCENDING),
+        ], unique=True, partialFilterExpression={"nameNormalized": {"$type": "string"}})
+        await self.db["generation_logs"].create_index([("createdAt", DESCENDING)])
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(default="Untitled Design", min_length=1, max_length=120)
+
+
+class ProjectSave(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    thumbnail: Optional[str] = None
+    layersSnapshot: Optional[str] = None
+
+
+class ProjectRename(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    displayName: str = Field(min_length=1, max_length=120)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    mongo = MongoManager(MONGODB_URI, MONGODB_DB_NAME, MONGODB_CONNECT_TIMEOUT_MS)
+    try:
+        await mongo.connect()
+        print(f"✅ MongoDB connected: db='{MONGODB_DB_NAME}'")
+    except Exception as exc:
+        mongo = MongoManager(MONGODB_URI, MONGODB_DB_NAME, MONGODB_CONNECT_TIMEOUT_MS)
+        print(f"⚠️ MongoDB connection failed: {exc}")
+        if MONGODB_REQUIRED:
+            raise RuntimeError("MongoDB connection is required but unavailable") from exc
+
+    app.state.mongo = mongo
+    yield
+    await mongo.disconnect()
 
 # --- 1. CONFIGURATION ---
 # Pix2Pix model for doodle translation
@@ -46,13 +244,41 @@ else:
 print(f"Using device: {device}")
 
 # --- 2. INITIALIZE FASTAPI APP AND LOAD MODELS ---
-app = FastAPI(title="ClothCraft AI")
+app = FastAPI(title="ClothCraft AI", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=MONGODB_CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
+
+
+async def get_current_user(request: Request) -> dict[str, Any]:
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    token = request.cookies.get(AUTH_COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid authentication token") from exc
+
+    try:
+        oid = parse_object_id(user_id)
+    except HTTPException as exc:
+        raise HTTPException(status_code=401, detail="Invalid authentication token") from exc
+    user_doc = await mongo.db["users"].find_one({"_id": oid})
+    if user_doc is None:
+        raise HTTPException(status_code=401, detail="User account not found")
+    return user_doc
 
 # Load Pix2Pix model for doodle translation
 try:
@@ -104,6 +330,30 @@ transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
+
+
+async def log_generation_event(
+    endpoint: str,
+    status: str,
+    duration_ms: int,
+    metadata: Optional[dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        return
+    try:
+        await mongo.db["generation_logs"].insert_one({
+            "endpoint": endpoint,
+            "status": status,
+            "durationMs": duration_ms,
+            "metadata": metadata or {},
+            "error": error,
+            "createdAt": now_utc(),
+        })
+    except Exception as exc:
+        # Logging must never fail the user-facing request.
+        print(f"⚠️ Failed to write generation log: {exc}")
 
 
 
@@ -292,12 +542,26 @@ def outpaint_to_full_body(img_pil):
 @app.post('/translate-doodle')
 async def translate_doodle_endpoint(file: UploadFile = File(...)):
     """Translates doodle using Pix2Pix model"""
+    start = time.perf_counter()
     try:
         img_bytes = await file.read()
         result_bytes = translate_doodle(img_bytes)
+        await log_generation_event(
+            endpoint="translate-doodle",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"filename": file.filename},
+        )
         return StreamingResponse(result_bytes, media_type='image/png')
     except Exception as e:
         print(f"Error translating doodle: {e}")
+        await log_generation_event(
+            endpoint="translate-doodle",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"filename": file.filename},
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 # Route for inpainting with Stable Diffusion
@@ -310,6 +574,7 @@ async def inpaint(
 ):
     """Inpaints reference image using Stable Diffusion with translated doodle as mask"""
     print("👕 Starting Clothify Inpainting...")
+    start = time.perf_counter()
     try:
         reference_bytes = await reference.read()
         mask_bytes = await mask.read()
@@ -319,9 +584,22 @@ async def inpaint(
             prompt,
             float(strength)
         )
+        await log_generation_event(
+            endpoint="inpaint",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"prompt": prompt, "strength": strength},
+        )
         return StreamingResponse(result_bytes, media_type='image/png')
     except Exception as e:
         print(f"Error inpainting: {e}")
+        await log_generation_event(
+            endpoint="inpaint",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"prompt": prompt, "strength": strength},
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 # Legacy endpoint (kept for backward compatibility)
@@ -339,6 +617,7 @@ async def refine_pattern_endpoint(
 ):
     """Refines a pattern using Stable Diffusion (img2img via inpainting)"""
     print("✨ Starting Pattern Refinement...")
+    start = time.perf_counter()
     try:
         image_bytes = await image.read()
         
@@ -356,9 +635,22 @@ async def refine_pattern_endpoint(
             prompt,
             strength=float(strength)
         )
+        await log_generation_event(
+            endpoint="refine-pattern",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"prompt": prompt, "strength": strength},
+        )
         return StreamingResponse(result_bytes, media_type='image/png')
     except Exception as e:
         print(f"Error refining pattern: {e}")
+        await log_generation_event(
+            endpoint="refine-pattern",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"prompt": prompt, "strength": strength},
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 # Global cache for latents to make slider adjustments instant
@@ -386,6 +678,7 @@ async def blend_styles(
     outpaint2_flag = outpaint2.lower() == 'true'
 
     print(f"👗 Starting Style Bending with alpha={alpha}...")
+    start = time.perf_counter()
     
     try:
         # Step 1 & 2: Project or retrieve from cache
@@ -428,10 +721,22 @@ async def blend_styles(
             blended_img_pil.save(byte_io, 'JPEG', quality=85)
             b64 = base64.b64encode(byte_io.getvalue()).decode('utf-8')
             frames.append(f"data:image/jpeg;base64,{b64}")
-            
+        await log_generation_event(
+            endpoint="blend-styles",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"alpha": alpha, "outpaint1": outpaint1_flag, "outpaint2": outpaint2_flag},
+        )
         return JSONResponse({"frames": frames})
     except Exception as e:
         print(f"Error blending styles: {e}")
+        await log_generation_event(
+            endpoint="blend-styles",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"alpha": alpha, "outpaint1": outpaint1_flag, "outpaint2": outpaint2_flag},
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 # Route for Text-to-Human generation
@@ -452,6 +757,7 @@ async def generate_human_endpoint(
     print(f"🧑 Starting Text-to-Human Generation...")
     print(f"📝 Prompt: {prompt}")
     print(f"🚫 Negative: {negative_prompt}")
+    start = time.perf_counter()
 
     try:
         # Create a blank white canvas — SD inpainting will replace everything
@@ -487,9 +793,22 @@ async def generate_human_endpoint(
         byte_io.seek(0)
 
         print("✅ Human generation complete!")
+        await log_generation_event(
+            endpoint="generate-human",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"steps": steps, "guidance": guidance},
+        )
         return StreamingResponse(byte_io, media_type='image/png')
     except Exception as e:
         print(f"Error generating human: {e}")
+        await log_generation_event(
+            endpoint="generate-human",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"steps": steps, "guidance": guidance},
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 # Route for AI Color Suggestions
@@ -500,6 +819,7 @@ async def suggest_colors_endpoint(prompt: str = Form(...)):
         raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
     
     print(f"🎨 Suggesting colors for: {prompt}")
+    start = time.perf_counter()
     
     try:
         # Create a small blank canvas for speed
@@ -523,16 +843,238 @@ async def suggest_colors_endpoint(prompt: str = Form(...)):
         byte_io = io.BytesIO()
         result.save(byte_io, 'PNG')
         byte_io.seek(0)
-        
+        await log_generation_event(
+            endpoint="suggest-colors",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"prompt": prompt},
+        )
         return StreamingResponse(byte_io, media_type='image/png')
     except Exception as e:
         print(f"Error suggesting colors: {e}")
+        await log_generation_event(
+            endpoint="suggest-colors",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"prompt": prompt},
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/health/db')
+async def health_db():
+    mongo: MongoManager = app.state.mongo
+    is_connected = mongo.db is not None
+    payload = {
+        "status": "ok" if is_connected else "degraded",
+        "mongodbConnected": is_connected,
+        "database": MONGODB_DB_NAME,
+    }
+    if is_connected:
+        await mongo.client.admin.command("ping")
+    return JSONResponse(payload)
+
+
+@app.post('/auth/signup')
+async def signup(payload: SignupRequest):
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    email = payload.email.lower().strip()
+    existing_user = await mongo.db["users"].find_one({"email": email})
+    if existing_user is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+    now_ms = utc_timestamp_ms()
+    user_doc = {
+        "email": email,
+        "displayName": payload.displayName.strip(),
+        "passwordHash": password_hasher.hash(payload.password),
+        "createdAt": now_ms,
+        "updatedAt": now_ms,
+    }
+    result = await mongo.db["users"].insert_one(user_doc)
+    created_user = await mongo.db["users"].find_one({"_id": result.inserted_id})
+
+    token = create_access_token(str(result.inserted_id))
+    response = JSONResponse(serialize_user(created_user))
+    set_auth_cookie(response, token)
+    return response
+
+
+@app.post('/auth/login')
+async def login(payload: LoginRequest):
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    email = payload.email.lower().strip()
+    user_doc = await mongo.db["users"].find_one({"email": email})
+    password_hash = "" if user_doc is None else user_doc.get("passwordHash", "")
+    try:
+        is_valid = bool(user_doc) and password_hasher.verify(password_hash, payload.password)
+    except (VerifyMismatchError, InvalidHash):
+        is_valid = False
+
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    if password_hasher.check_needs_rehash(password_hash):
+        await mongo.db["users"].update_one(
+            {"_id": user_doc["_id"]},
+            {"$set": {"passwordHash": password_hasher.hash(payload.password), "updatedAt": utc_timestamp_ms()}},
+        )
+
+    token = create_access_token(str(user_doc["_id"]))
+    response = JSONResponse(serialize_user(user_doc))
+    set_auth_cookie(response, token)
+    return response
+
+
+@app.post('/auth/logout')
+async def logout():
+    response = JSONResponse({"logout": True})
+    clear_auth_cookie(response)
+    return response
+
+
+@app.get('/auth/me')
+async def auth_me(current_user: dict[str, Any] = Depends(get_current_user)):
+    return JSONResponse(serialize_user(current_user))
+
+
+@app.post('/projects')
+async def create_project(project: ProjectCreate, current_user: dict[str, Any] = Depends(get_current_user)):
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    normalized_name = normalize_project_name(project.name)
+    conflict = await mongo.db["projects"].find_one(
+        build_name_conflict_filter(str(current_user["_id"]), normalized_name, project.name)
+    )
+    if conflict is not None:
+        raise HTTPException(status_code=409, detail="A project with this name already exists")
+    now_ms = utc_timestamp_ms()
+    doc = {
+        "userId": str(current_user["_id"]),
+        "name": project.name.strip(),
+        "nameNormalized": normalized_name,
+        "createdAt": now_ms,
+        "updatedAt": now_ms,
+        "thumbnail": None,
+        "layersSnapshot": None,
+    }
+    try:
+        result = await mongo.db["projects"].insert_one(doc)
+    except DuplicateKeyError as exc:
+        raise HTTPException(status_code=409, detail="A project with this name already exists") from exc
+    created = await mongo.db["projects"].find_one({"_id": result.inserted_id})
+    return JSONResponse(serialize_project(created))
+
+
+@app.get('/projects')
+async def list_projects(current_user: dict[str, Any] = Depends(get_current_user)):
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    cursor = mongo.db["projects"].find({"userId": str(current_user["_id"])}).sort("updatedAt", DESCENDING)
+    items = [serialize_project(doc) async for doc in cursor]
+    return JSONResponse(items)
+
+
+@app.get('/projects/item/{project_id}')
+async def get_project(project_id: str, current_user: dict[str, Any] = Depends(get_current_user)):
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    oid = parse_object_id(project_id)
+    doc = await mongo.db["projects"].find_one({"_id": oid, "userId": str(current_user["_id"])})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return JSONResponse(serialize_project(doc))
+
+
+@app.put('/projects/{project_id}')
+async def save_project(project_id: str, payload: ProjectSave, current_user: dict[str, Any] = Depends(get_current_user)):
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    oid = parse_object_id(project_id)
+    normalized_name = normalize_project_name(payload.name)
+    conflict = await mongo.db["projects"].find_one(
+        build_name_conflict_filter(str(current_user["_id"]), normalized_name, payload.name, exclude_id=oid)
+    )
+    if conflict is not None:
+        raise HTTPException(status_code=409, detail="A project with this name already exists")
+    update = {
+        "$set": {
+            "name": payload.name.strip(),
+            "nameNormalized": normalized_name,
+            "thumbnail": payload.thumbnail,
+            "layersSnapshot": payload.layersSnapshot,
+            "updatedAt": utc_timestamp_ms(),
+        }
+    }
+    try:
+        result = await mongo.db["projects"].update_one({"_id": oid, "userId": str(current_user["_id"])}, update)
+    except DuplicateKeyError as exc:
+        raise HTTPException(status_code=409, detail="A project with this name already exists") from exc
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    doc = await mongo.db["projects"].find_one({"_id": oid, "userId": str(current_user["_id"])})
+    return JSONResponse(serialize_project(doc))
+
+
+@app.patch('/projects/{project_id}/rename')
+async def rename_project(project_id: str, payload: ProjectRename, current_user: dict[str, Any] = Depends(get_current_user)):
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    normalized_name = normalize_project_name(payload.name)
+    oid = parse_object_id(project_id)
+    conflict = await mongo.db["projects"].find_one(
+        build_name_conflict_filter(str(current_user["_id"]), normalized_name, payload.name, exclude_id=oid)
+    )
+    if conflict is not None:
+        raise HTTPException(status_code=409, detail="A project with this name already exists")
+    try:
+        result = await mongo.db["projects"].update_one(
+            {"_id": oid, "userId": str(current_user["_id"])},
+            {"$set": {"name": payload.name.strip(), "nameNormalized": normalized_name, "updatedAt": utc_timestamp_ms()}},
+        )
+    except DuplicateKeyError as exc:
+        raise HTTPException(status_code=409, detail="A project with this name already exists") from exc
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    doc = await mongo.db["projects"].find_one({"_id": oid, "userId": str(current_user["_id"])})
+    return JSONResponse(serialize_project(doc))
+
+
+@app.delete('/projects/{project_id}')
+async def delete_project(project_id: str, current_user: dict[str, Any] = Depends(get_current_user)):
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    oid = parse_object_id(project_id)
+    result = await mongo.db["projects"].delete_one({"_id": oid, "userId": str(current_user["_id"])})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return JSONResponse({"deleted": True, "projectId": project_id})
 
 # --- 4. RUN THE APP ---
 if __name__ == '__main__':
     print("\n🚀 Starting FastAPI server...")
     print("Docs:          http://127.0.0.1:5001/docs")
     print("API endpoint:  http://127.0.0.1:5001/predict")
-    print("React frontend should run on http://localhost:5173")
+    print("React frontend should run on http://localhost:3000")
     uvicorn.run(app, host='0.0.0.0', port=5001)

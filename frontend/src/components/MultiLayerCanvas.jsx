@@ -7,7 +7,9 @@ const MultiLayerCanvas = forwardRef(({
     brushSize,
     brushColor,
     activeTool,
-    onLayerUpdate
+    onLayerUpdate,
+    onCanvasSizeChange,
+    onHistoryStateChange
 }, ref) => {
     const containerRef = useRef(null);
     const wrapperRef = useRef(null);
@@ -38,6 +40,9 @@ const MultiLayerCanvas = forwardRef(({
     const [selectionActive, setSelectionActive] = useState(false);
     // Whether Space is held for temporary pan
     const spaceHeld = useRef(false);
+    const pendingAutoFitRef = useRef(false);
+    const historyRef = useRef({});
+    const MAX_HISTORY_STEPS = 40;
 
     // Imperatively focus the text input after it mounts (autoFocus is unreliable inside mousedown handlers)
     useEffect(() => {
@@ -82,6 +87,31 @@ const MultiLayerCanvas = forwardRef(({
         });
     }, [layers]);
 
+    useEffect(() => {
+        if (typeof onCanvasSizeChange === 'function') {
+            onCanvasSizeChange(canvasSize);
+        }
+    }, [canvasSize.width, canvasSize.height]);
+
+    // Run fit-to-screen only after canvasSize state has updated.
+    useEffect(() => {
+        if (!pendingAutoFitRef.current) return;
+        if (!containerRef.current) return;
+
+        const containerWidth = containerRef.current.clientWidth;
+        const containerHeight = containerRef.current.clientHeight;
+        if (!containerWidth || !containerHeight) return;
+
+        const scale = Math.min(
+            containerWidth / canvasSize.width,
+            containerHeight / canvasSize.height
+        ) * 0.9;
+
+        setViewScale(scale);
+        setViewOffset({ x: 0, y: 0 });
+        pendingAutoFitRef.current = false;
+    }, [canvasSize.width, canvasSize.height]);
+
     // Handle wheel zoom
     useEffect(() => {
         const container = containerRef.current;
@@ -124,6 +154,7 @@ const MultiLayerCanvas = forwardRef(({
             } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectionRef.current && activeLayerId) {
                 const canvasEl = canvasRefs.current[activeLayerId]?.current;
                 if (!canvasEl) return;
+                recordHistoryStep(activeLayerId);
                 const sel = selectionRef.current;
                 const ctx = canvasEl.getContext('2d');
                 ctx.save();
@@ -324,6 +355,121 @@ const MultiLayerCanvas = forwardRef(({
             width: maxX - minX + 1,
             height: maxY - minY + 1
         };
+    };
+
+    const createLayerSnapshot = (layerId) => {
+        const canvasEl = canvasRefs.current[layerId]?.current;
+        const layer = layers.find((l) => l.id === layerId);
+        if (!canvasEl || !layer) return null;
+
+        return {
+            canvasData: canvasEl.toDataURL('image/png'),
+            bounds: getContentBounds(canvasEl),
+            transform: layer.transform || { x: 0, y: 0, scale: 1 },
+        };
+    };
+
+    const buildThumbnailFromData = (data) => {
+        return new Promise((resolve) => {
+            const thumbnailCanvas = document.createElement('canvas');
+            thumbnailCanvas.width = 100;
+            thumbnailCanvas.height = 100;
+            const tCtx = thumbnailCanvas.getContext('2d');
+            const img = new Image();
+            img.onload = () => {
+                tCtx.clearRect(0, 0, 100, 100);
+                const scale = Math.min(100 / img.width, 100 / img.height);
+                const drawW = img.width * scale;
+                const drawH = img.height * scale;
+                const drawX = (100 - drawW) / 2;
+                const drawY = (100 - drawH) / 2;
+                tCtx.drawImage(img, drawX, drawY, drawW, drawH);
+                resolve(thumbnailCanvas.toDataURL('image/png'));
+            };
+            img.src = data;
+        });
+    };
+
+    const emitHistoryState = useCallback((layerId = activeLayerId) => {
+        if (typeof onHistoryStateChange !== 'function') return;
+        if (!layerId) {
+            onHistoryStateChange({ canUndo: false, canRedo: false });
+            return;
+        }
+
+        const layerHistory = historyRef.current[layerId] || { undo: [], redo: [] };
+        onHistoryStateChange({
+            canUndo: layerHistory.undo.length > 0,
+            canRedo: layerHistory.redo.length > 0,
+        });
+    }, [activeLayerId, onHistoryStateChange]);
+
+    const recordHistoryStep = (layerId) => {
+        if (!layerId) return;
+        const snapshot = createLayerSnapshot(layerId);
+        if (!snapshot) return;
+
+        if (!historyRef.current[layerId]) {
+            historyRef.current[layerId] = { undo: [], redo: [] };
+        }
+
+        const layerHistory = historyRef.current[layerId];
+        layerHistory.undo.push(snapshot);
+        if (layerHistory.undo.length > MAX_HISTORY_STEPS) {
+            layerHistory.undo.shift();
+        }
+        layerHistory.redo = [];
+        emitHistoryState(layerId);
+    };
+
+    const applyLayerSnapshot = async (layerId, snapshot) => {
+        const canvasEl = canvasRefs.current[layerId]?.current;
+        if (!canvasEl || !snapshot) return;
+
+        const ctx = canvasEl.getContext('2d');
+        const img = new Image();
+
+        await new Promise((resolve) => {
+            img.onload = () => {
+                ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.drawImage(img, 0, 0);
+                resolve();
+            };
+            img.src = snapshot.canvasData;
+        });
+
+        const thumbnail = await buildThumbnailFromData(snapshot.canvasData);
+        onLayerUpdate(layerId, {
+            canvasData: snapshot.canvasData,
+            thumbnail,
+            bounds: snapshot.bounds,
+            transform: snapshot.transform || { x: 0, y: 0, scale: 1 },
+        });
+    };
+
+    const undoLayer = async (layerId) => {
+        if (!layerId || !historyRef.current[layerId]?.undo.length) return;
+        const currentSnapshot = createLayerSnapshot(layerId);
+        if (!currentSnapshot) return;
+
+        const layerHistory = historyRef.current[layerId];
+        const previousSnapshot = layerHistory.undo.pop();
+        layerHistory.redo.push(currentSnapshot);
+        await applyLayerSnapshot(layerId, previousSnapshot);
+        emitHistoryState(layerId);
+    };
+
+    const redoLayer = async (layerId) => {
+        if (!layerId || !historyRef.current[layerId]?.redo.length) return;
+        const currentSnapshot = createLayerSnapshot(layerId);
+        if (!currentSnapshot) return;
+
+        const layerHistory = historyRef.current[layerId];
+        const nextSnapshot = layerHistory.redo.pop();
+        layerHistory.undo.push(currentSnapshot);
+        await applyLayerSnapshot(layerId, nextSnapshot);
+        emitHistoryState(layerId);
     };
 
     // ── Overlay helpers ──────────────────────────────────────────────────────
@@ -549,6 +695,7 @@ const MultiLayerCanvas = forwardRef(({
         if (!float || !activeLayerId) return;
         const canvasEl = canvasRefs.current[activeLayerId]?.current;
         if (!canvasEl) return;
+        recordHistoryStep(activeLayerId);
         const ctx = canvasEl.getContext('2d');
         const bounds = getSelBounds(float.sel);
         const sx = float.sx ?? 1;
@@ -611,6 +758,7 @@ const MultiLayerCanvas = forwardRef(({
         if (!activeLayerId) return;
         const canvasEl = canvasRefs.current[activeLayerId]?.current;
         if (!canvasEl) return;
+        recordHistoryStep(activeLayerId);
         const activeLayerForShape = layers.find(l => l.id === activeLayerId);
         const t = activeLayerForShape?.transform || { x: 0, y: 0, scale: 1 };
         // Convert from wrapper-space to layer canvas-space
@@ -652,6 +800,7 @@ const MultiLayerCanvas = forwardRef(({
         if (!activeLayerId || !text.trim()) return;
         const canvasEl = canvasRefs.current[activeLayerId]?.current;
         if (!canvasEl) return;
+        recordHistoryStep(activeLayerId);
         const layerForText = layers.find(l => l.id === activeLayerId);
         const t = layerForText?.transform || { x: 0, y: 0, scale: 1 };
         const ctx = canvasEl.getContext('2d');
@@ -827,6 +976,7 @@ const MultiLayerCanvas = forwardRef(({
 
                             // Erase those pixels from the layer canvas
                             const layerCtx = canvasEl.getContext('2d');
+                            recordHistoryStep(activeLayerId);
                             layerCtx.save();
                             layerCtx.globalCompositeOperation = 'destination-out';
                             layerCtx.clip(applySelectionClipPath(sel, activeLayer.transform || { x: 0, y: 0, scale: 1 }));
@@ -910,6 +1060,7 @@ const MultiLayerCanvas = forwardRef(({
         }
 
         if (activeTool === 'brush' || activeTool === 'eraser') {
+            recordHistoryStep(activeLayerId);
             setIsDrawing(true);
             draw(e);
             return;
@@ -1252,6 +1403,10 @@ const MultiLayerCanvas = forwardRef(({
         }
     }, [activeTool, activeLayerId]);
 
+    useEffect(() => {
+        emitHistoryState(activeLayerId);
+    }, [activeLayerId, emitHistoryState]);
+
     const updateLayerThumbnail = (layerId, newCanvasData) => {
         const canvasRef = canvasRefs.current[layerId];
         if (canvasRef && canvasRef.current) {
@@ -1268,7 +1423,13 @@ const MultiLayerCanvas = forwardRef(({
 
             const img = new Image();
             img.onload = () => {
-                tCtx.drawImage(img, 0, 0, 100, 100);
+                tCtx.clearRect(0, 0, 100, 100);
+                const scale = Math.min(100 / img.width, 100 / img.height);
+                const drawW = img.width * scale;
+                const drawH = img.height * scale;
+                const drawX = (100 - drawW) / 2;
+                const drawY = (100 - drawH) / 2;
+                tCtx.drawImage(img, drawX, drawY, drawW, drawH);
                 const thumbnail = thumbnailCanvas.toDataURL('image/png');
                 onLayerUpdate(layerId, { thumbnail, canvasData: data, bounds });
             };
@@ -1314,6 +1475,8 @@ const MultiLayerCanvas = forwardRef(({
         loadImageToLayer: async (layerId, imageBlob, shouldResizeCanvas = false) => {
             const canvasRef = canvasRefs.current[layerId];
             if (!canvasRef || !canvasRef.current) return;
+
+            recordHistoryStep(layerId);
 
             const img = new Image();
             const url = URL.createObjectURL(imageBlob);
@@ -1395,11 +1558,30 @@ const MultiLayerCanvas = forwardRef(({
             }
         },
 
-        setCanvasSize: (width, height) => {
+        setCanvasSize: (width, height, autoFit = false) => {
+            pendingAutoFitRef.current = autoFit;
             setCanvasSize({ width, height });
         },
 
         getCanvasSize: () => ({ ...canvasSize }),
+
+        undoActiveLayer: async () => {
+            await undoLayer(activeLayerId);
+        },
+
+        redoActiveLayer: async () => {
+            await redoLayer(activeLayerId);
+        },
+
+        canUndoActiveLayer: () => {
+            if (!activeLayerId) return false;
+            return (historyRef.current[activeLayerId]?.undo.length || 0) > 0;
+        },
+
+        canRedoActiveLayer: () => {
+            if (!activeLayerId) return false;
+            return (historyRef.current[activeLayerId]?.redo.length || 0) > 0;
+        },
     }));
 
     return (
@@ -1455,7 +1637,7 @@ const MultiLayerCanvas = forwardRef(({
                             width={canvasSize.width}
                             height={canvasSize.height}
                             style={{
-                                opacity: layer.visible ? (layer.opacity || 1.0) : 0,
+                                opacity: layer.visible ? (layer.opacity ?? 1.0) : 0,
                                 mixBlendMode: layer.blendMode || 'normal',
                                 pointerEvents: layer.id === activeLayerId && !layer.locked ? 'auto' : 'none',
                                 transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
