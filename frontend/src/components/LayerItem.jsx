@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette } from 'lucide-react';
 import './LayersPanel.css';
@@ -9,6 +9,12 @@ const LayerItem = ({
     onSelect,
     onToggleVisibility,
     onToggleLock,
+    onDragStart,
+    onDragOver,
+    onDrop,
+    onDragEnd,
+    onRename,
+    onDuplicate,
     onDelete,
     onClothify,
     onPatternMaker,
@@ -16,6 +22,22 @@ const LayerItem = ({
 }) => {
     const [showContextMenu, setShowContextMenu] = useState(false);
     const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
+    const [isDragging, setIsDragging] = useState(false);
+    const [isRenaming, setIsRenaming] = useState(false);
+    const [nameValue, setNameValue] = useState(layer.name);
+    const renameInputRef = useRef(null);
+
+    React.useEffect(() => {
+        if (!isRenaming) {
+            setNameValue(layer.name);
+        }
+    }, [layer.name, isRenaming]);
+
+    React.useEffect(() => {
+        if (!isRenaming) return;
+        const tid = setTimeout(() => renameInputRef.current?.focus(), 0);
+        return () => clearTimeout(tid);
+    }, [isRenaming]);
 
     const handleContextMenu = (e) => {
         e.preventDefault();
@@ -31,6 +53,26 @@ const LayerItem = ({
     const handleDelete = () => {
         setShowContextMenu(false);
         onDelete(layer.id);
+    };
+
+    const startRename = () => {
+        setShowContextMenu(false);
+        setIsRenaming(true);
+        setNameValue(layer.name);
+    };
+
+    const commitRename = () => {
+        const trimmed = (nameValue || '').trim();
+        if (trimmed && trimmed !== layer.name) {
+            onRename && onRename(layer.id, trimmed);
+        }
+        setNameValue(trimmed || layer.name);
+        setIsRenaming(false);
+    };
+
+    const cancelRename = () => {
+        setNameValue(layer.name);
+        setIsRenaming(false);
     };
 
     React.useEffect(() => {
@@ -50,9 +92,31 @@ const LayerItem = ({
     return (
         <>
             <div
-                className={`layer-item ${isActive ? 'active' : ''} ${layer.locked ? 'locked' : ''}`}
+                className={`layer-item ${isActive ? 'active' : ''} ${layer.locked ? 'locked' : ''} ${isDragging ? 'dragging' : ''}`}
                 onClick={() => onSelect(layer.id)}
                 onContextMenu={handleContextMenu}
+                draggable={layer.type !== 'reference'}
+                onDragStart={(e) => {
+                    if (layer.type === 'reference') return;
+                    e.dataTransfer.effectAllowed = 'move';
+                    setIsDragging(true);
+                    onDragStart(layer.id);
+                }}
+                onDragOver={(e) => {
+                    if (layer.type === 'reference') return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    onDragOver(layer.id);
+                }}
+                onDrop={(e) => {
+                    if (layer.type === 'reference') return;
+                    e.preventDefault();
+                    onDrop(layer.id);
+                }}
+                onDragEnd={() => {
+                    setIsDragging(false);
+                    onDragEnd();
+                }}
             >
                 {layer.type !== 'reference' && (
                     <button
@@ -77,7 +141,31 @@ const LayerItem = ({
                 </div>
 
                 <div className="layer-info">
-                    <div className="layer-name">{layer.name}</div>
+                    {isRenaming ? (
+                        <input
+                            ref={renameInputRef}
+                            className="layer-name-input"
+                            value={nameValue}
+                            maxLength={80}
+                            onChange={(e) => setNameValue(e.target.value)}
+                            onBlur={commitRename}
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    commitRename();
+                                }
+                                if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    cancelRename();
+                                }
+                                e.stopPropagation();
+                            }}
+                        />
+                    ) : (
+                        <div className="layer-name">{layer.name}</div>
+                    )}
                     <div className="layer-type">{layer.type}</div>
                 </div>
 
@@ -143,10 +231,13 @@ const LayerItem = ({
                                 <Sparkles size={16} /> Clothify
                             </div>
                             <div className="layer-context-menu-divider" />
-                            <div className="layer-context-menu-item" onClick={() => setShowContextMenu(false)}>
+                            <div className="layer-context-menu-item" onClick={startRename}>
                                 <Edit size={16} /> Rename
                             </div>
-                            <div className="layer-context-menu-item" onClick={() => setShowContextMenu(false)}>
+                            <div className="layer-context-menu-item" onClick={() => {
+                                setShowContextMenu(false);
+                                onDuplicate && onDuplicate(layer.id);
+                            }}>
                                 <Copy size={16} /> Duplicate
                             </div>
                             <div className="layer-context-menu-item" onClick={() => {

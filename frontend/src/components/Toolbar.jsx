@@ -10,11 +10,25 @@ import {
     Type,
     Move,
     ZoomIn,
-    Palette
+    Palette,
+    Undo2,
+    Redo2
 } from 'lucide-react';
 import './Toolbar.css';
 
-const Toolbar = ({ activeTool, onToolChange, brushColor, onColorChange, moodboardColors, onOpenMoodboard, disabled }) => {
+const Toolbar = ({
+    activeTool,
+    onToolChange,
+    brushColor,
+    onColorChange,
+    moodboardColors,
+    onOpenMoodboard,
+    onUndo,
+    onRedo,
+    canUndo,
+    canRedo,
+    disabled,
+}) => {
     const tools = [
         { id: 'brush',        icon: Paintbrush,          label: 'Brush',     hint: 'Drag to paint' },
         { id: 'eraser',       icon: Eraser,              label: 'Eraser',    hint: 'Drag to erase pixels' },
@@ -50,6 +64,28 @@ const Toolbar = ({ activeTool, onToolChange, brushColor, onColorChange, moodboar
                     </React.Fragment>
                 );
             })}
+
+            <div className="toolbar-divider" />
+
+            <button
+                className="toolbar-tool"
+                onClick={onUndo}
+                disabled={disabled || !canUndo}
+                title="Undo (Ctrl/Cmd+Z)"
+            >
+                <Undo2 size={20} strokeWidth={2} />
+                <span className="toolbar-tool-tooltip">Undo</span>
+            </button>
+
+            <button
+                className="toolbar-tool"
+                onClick={onRedo}
+                disabled={disabled || !canRedo}
+                title="Redo (Ctrl/Cmd+Shift+Z or Ctrl+Y)"
+            >
+                <Redo2 size={20} strokeWidth={2} />
+                <span className="toolbar-tool-tooltip">Redo</span>
+            </button>
 
             <div className="toolbar-color-section">
                 <div

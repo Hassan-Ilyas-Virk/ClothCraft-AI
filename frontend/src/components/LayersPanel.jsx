@@ -10,6 +10,8 @@ const LayersPanel = ({
     onAddLayer,
     onToggleVisibility,
     onToggleLock,
+    onReorderLayers,
+    onDuplicateLayer,
     onDeleteLayer,
     onClothify,
     onPatternMaker,
@@ -19,10 +21,60 @@ const LayersPanel = ({
     onGenerateHuman
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
+    const [draggedLayerId, setDraggedLayerId] = useState(null);
+    const [dragOverGapIndex, setDragOverGapIndex] = useState(null);
 
     const activeLayer = layers.find(l => l.id === activeLayerId);
     const referenceLayer = layers.find(l => l.type === 'reference');
     const drawingLayers = layers.filter(l => l.type !== 'reference');
+    const drawingLayersTopDown = [...drawingLayers].reverse();
+    const handleLayerDragStart = (layerId) => {
+        setDraggedLayerId(layerId);
+    };
+
+    const handleLayerDragOver = (layerId) => {
+        if (!draggedLayerId || draggedLayerId === layerId) return;
+    };
+
+    const handleGapDragOver = (gapIndex) => {
+        if (!draggedLayerId) return;
+        setDragOverGapIndex(gapIndex);
+    };
+
+    const handleLayerDrop = () => {
+    };
+
+    const handleGapDrop = (gapIndex) => {
+        if (!draggedLayerId || drawingLayersTopDown.length === 0) {
+            setDraggedLayerId(null);
+            setDragOverGapIndex(null);
+            return;
+        }
+
+        const fromIndex = layers.findIndex((layer) => layer.id === draggedLayerId);
+        let toIndex = -1;
+
+        if (gapIndex === 0) {
+            const topMost = drawingLayersTopDown[0];
+            const topMostIndex = layers.findIndex((layer) => layer.id === topMost.id);
+            toIndex = topMostIndex + 1;
+        } else {
+            const upperNeighbor = drawingLayersTopDown[gapIndex - 1];
+            toIndex = layers.findIndex((layer) => layer.id === upperNeighbor.id);
+        }
+
+        if (fromIndex !== -1 && toIndex !== -1) {
+            onReorderLayers(fromIndex, toIndex);
+        }
+
+        setDraggedLayerId(null);
+        setDragOverGapIndex(null);
+    };
+
+    const handleLayerDragEnd = () => {
+        setDraggedLayerId(null);
+        setDragOverGapIndex(null);
+    };
 
 
     return (
@@ -112,19 +164,57 @@ const LayersPanel = ({
                 ) : (
                     <>
                         {/* Drawing Layers (Top to Bottom) */}
-                        {[...drawingLayers].reverse().map((layer) => (
-                            <LayerItem
-                                key={layer.id}
-                                layer={layer}
-                                isActive={layer.id === activeLayerId}
-                                onSelect={onLayerSelect}
-                                onToggleVisibility={onToggleVisibility}
-                                onToggleLock={onToggleLock}
-                                onDelete={onDeleteLayer}
-                                onClothify={onClothify}
-                                onPatternMaker={onPatternMaker}
+                        {drawingLayersTopDown.map((layer, idx) => {
+                            return (
+                                <React.Fragment key={layer.id}>
+                                    <div
+                                        className={`layer-drop-gap ${draggedLayerId ? 'visible' : ''} ${dragOverGapIndex === idx ? 'drag-over' : ''}`}
+                                        onDragOver={(e) => {
+                                            if (!draggedLayerId) return;
+                                            e.preventDefault();
+                                            handleGapDragOver(idx);
+                                        }}
+                                        onDrop={(e) => {
+                                            if (!draggedLayerId) return;
+                                            e.preventDefault();
+                                            handleGapDrop(idx);
+                                        }}
+                                    />
+                                    <LayerItem
+                                        layer={layer}
+                                        isActive={layer.id === activeLayerId}
+                                        onSelect={onLayerSelect}
+                                        onToggleVisibility={onToggleVisibility}
+                                        onToggleLock={onToggleLock}
+                                        onDragStart={handleLayerDragStart}
+                                        onDragOver={handleLayerDragOver}
+                                        onDrop={handleLayerDrop}
+                                        onDragEnd={handleLayerDragEnd}
+                                        onRename={(id, name) => onUpdateLayer(id, { name })}
+                                        onDuplicate={onDuplicateLayer}
+                                        onDelete={onDeleteLayer}
+                                        onClothify={onClothify}
+                                        onPatternMaker={onPatternMaker}
+                                    />
+                                </React.Fragment>
+                            );
+                        })}
+
+                        {drawingLayersTopDown.length > 0 && (
+                            <div
+                                className={`layer-drop-gap ${draggedLayerId ? 'visible' : ''} ${dragOverGapIndex === drawingLayersTopDown.length ? 'drag-over' : ''}`}
+                                onDragOver={(e) => {
+                                    if (!draggedLayerId) return;
+                                    e.preventDefault();
+                                    handleGapDragOver(drawingLayersTopDown.length);
+                                }}
+                                onDrop={(e) => {
+                                    if (!draggedLayerId) return;
+                                    e.preventDefault();
+                                    handleGapDrop(drawingLayersTopDown.length);
+                                }}
                             />
-                        ))}
+                        )}
 
                         {/* Reference Layer (Pinned to Bottom) */}
                         {referenceLayer && (
@@ -136,7 +226,9 @@ const LayersPanel = ({
                                     onSelect={onLayerSelect}
                                     onToggleVisibility={onToggleVisibility}
                                     onToggleLock={onToggleLock}
+                                    onRename={(id, name) => onUpdateLayer(id, { name })}
                                     onDelete={onDeleteLayer}
+                                    onDuplicate={onDuplicateLayer}
                                     onClothify={onClothify}
                                     onPatternMaker={onPatternMaker}
                                     onStylebend={onStylebendFromLayer}

@@ -50,6 +50,8 @@ function App() {
         updateLayer,
         toggleLayerVisibility,
         toggleLayerLock,
+        reorderLayers,
+        duplicateLayer,
         getReferenceLayer,
         loadAllLayers,
     } = useLayerManager();
@@ -70,6 +72,7 @@ function App() {
     const [moodboardColors, setMoodboardColors] = useState([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState(null);
+    const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
 
     // Handle Spacebar Pan (Photoshop style)
     useEffect(() => {
@@ -89,6 +92,22 @@ function App() {
             if (e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.metaKey) {
                 e.preventDefault();
                 canvasRef.current?.fitToScreen();
+            }
+
+            const isUndoCombo = (e.ctrlKey || e.metaKey) && !e.altKey && e.code === 'KeyZ' && !e.shiftKey;
+            const isRedoCombo = ((e.ctrlKey || e.metaKey) && !e.altKey && e.code === 'KeyZ' && e.shiftKey)
+                || (e.ctrlKey && !e.metaKey && !e.altKey && e.code === 'KeyY');
+
+            if (isUndoCombo) {
+                e.preventDefault();
+                void canvasRef.current?.undoActiveLayer?.();
+                return;
+            }
+
+            if (isRedoCombo) {
+                e.preventDefault();
+                void canvasRef.current?.redoActiveLayer?.();
+                return;
             }
 
             if (e.code === 'Space' && !e.repeat && activeTool !== 'pan') {
@@ -369,6 +388,16 @@ function App() {
     // Handle layer update (thumbnail, canvas data)
     const handleLayerUpdate = (layerId, updates) => {
         updateLayer(layerId, updates);
+    };
+
+    const handleUndo = async () => {
+        if (!canvasRef.current) return;
+        await canvasRef.current.undoActiveLayer?.();
+    };
+
+    const handleRedo = async () => {
+        if (!canvasRef.current) return;
+        await canvasRef.current.redoActiveLayer?.();
     };
 
     // Handle opening Clothify modal
@@ -652,6 +681,10 @@ function App() {
                         onColorChange={setBrushColor}
                         moodboardColors={moodboardColors}
                         onOpenMoodboard={handleOpenMoodboard}
+                        onUndo={handleUndo}
+                        onRedo={handleRedo}
+                        canUndo={historyState.canUndo}
+                        canRedo={historyState.canRedo}
                         disabled={isProcessing || !activeLayerId}
                     />
                 )}
@@ -734,6 +767,7 @@ function App() {
                             activeTool={activeTool}
                             onLayerUpdate={handleLayerUpdate}
                             onCanvasSizeChange={setCurrentCanvasSize}
+                            onHistoryStateChange={setHistoryState}
                         />
                     ) : (
                         <div className="empty-state">
@@ -773,6 +807,8 @@ function App() {
                         onAddLayer={handleAddLayer}
                         onToggleVisibility={toggleLayerVisibility}
                         onToggleLock={toggleLayerLock}
+                        onReorderLayers={reorderLayers}
+                        onDuplicateLayer={duplicateLayer}
                         onDeleteLayer={removeLayer}
                         onClothify={handleClothify}
                         onPatternMaker={handlePatternMaker}
