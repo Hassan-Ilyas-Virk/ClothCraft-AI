@@ -39,6 +39,7 @@ function App() {
     const [canvasNameError, setCanvasNameError] = useState('');
     const [savedCanvasSize, setSavedCanvasSize] = useState(null);
     const [currentCanvasSize, setCurrentCanvasSize] = useState({ width: 1024, height: 1024 });
+    const hydrationStateRef = useRef({ projectId: null, ready: false, targetSize: null });
     // ───────────────────────────────────────────────────────────────────
 
     const {
@@ -166,17 +167,32 @@ function App() {
     // Restore layers when a project is opened (key off project id so it only fires on project change)
     useEffect(() => {
         if (!currentProject) return;
+        hydrationStateRef.current = { projectId: currentProject.id, ready: false, targetSize: null };
         setCanvasName(currentProject.name || 'Untitled Design');
         if (currentProject.layersSnapshot) {
             try {
                 const { layers: sl, activeLayerId: sa, canvasWidth: cw, canvasHeight: ch } = JSON.parse(currentProject.layersSnapshot);
-                loadAllLayers(sl, sa);
-                if (cw && ch) setSavedCanvasSize({ width: cw, height: ch });
+                const normalizedLayers = (sl || []).map((layer) => {
+                    if (layer?.type !== 'reference') return layer;
+                    return {
+                        ...layer,
+                        locked: true,
+                        transform: { x: 0, y: 0, scale: 1, rotation: 0 },
+                    };
+                });
+                loadAllLayers(normalizedLayers, sa);
+                const normalized = sanitizeSnapshotCanvasSize(currentProject.layersSnapshot);
+                if (normalized) setSavedCanvasSize(normalized);
+                else if (cw && ch) setSavedCanvasSize({ width: cw, height: ch });
                 else setSavedCanvasSize(null);
-            } catch { loadAllLayers([], null); }
+            } catch {
+                loadAllLayers([], null);
+                hydrationStateRef.current = { projectId: currentProject.id, ready: true, targetSize: null };
+            }
         } else {
             loadAllLayers([], null);
             setSavedCanvasSize(null);
+            hydrationStateRef.current = { projectId: currentProject.id, ready: true, targetSize: null };
         }
     }, [currentProject?.id]);
 
@@ -187,6 +203,11 @@ function App() {
         if (layers.length === 0) return;
 
         if (savedCanvasSize) {
+            hydrationStateRef.current = {
+                projectId: currentProject?.id || null,
+                ready: false,
+                targetSize: { width: savedCanvasSize.width, height: savedCanvasSize.height },
+            };
             canvasRef.current.setCanvasSize(savedCanvasSize.width, savedCanvasSize.height, true);
             return;
         }
@@ -194,12 +215,61 @@ function App() {
         // Default framing for projects without stored dimensions.
         requestAnimationFrame(() => {
             canvasRef.current?.fitToScreen();
+            hydrationStateRef.current = { projectId: currentProject?.id || null, ready: true, targetSize: null };
         });
     }, [currentView, savedCanvasSize, layers.length]);
+
+    // Keep canvas size pinned to reference content size immediately (no delayed snap-back).
+    useEffect(() => {
+        if (currentView !== 'canvas') return;
+        if (!canvasRef.current) return;
+
+        const referenceLayer = layers.find((l) => l?.type === 'reference');
+        if (!referenceLayer) return;
+
+        const targetW = Number(referenceLayer?.bounds?.width);
+        const targetH = Number(referenceLayer?.bounds?.height);
+        if (Number.isFinite(targetW) && Number.isFinite(targetH) && targetW > 0 && targetH > 0) {
+            const roundedW = Math.round(targetW);
+            const roundedH = Math.round(targetH);
+            if (currentCanvasSize.width !== roundedW || currentCanvasSize.height !== roundedH) {
+                canvasRef.current.setCanvasSize(roundedW, roundedH, false);
+            }
+            return;
+        }
+
+        // Fallback for snapshots where reference bounds are missing: derive from image itself.
+        if (!referenceLayer?.canvasData) return;
+        let cancelled = false;
+        void getImageDimensions(referenceLayer.canvasData).then((dims) => {
+            if (cancelled || !dims || !canvasRef.current) return;
+            if (currentCanvasSize.width !== dims.width || currentCanvasSize.height !== dims.height) {
+                canvasRef.current.setCanvasSize(dims.width, dims.height, false);
+            }
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [currentView, currentCanvasSize.width, currentCanvasSize.height, layers]);
+
+    // Only mark hydration complete after canvas reports the exact restored dimensions.
+    useEffect(() => {
+        if (currentView !== 'canvas' || !currentProject) return;
+
+        const hs = hydrationStateRef.current;
+        if (hs.ready || hs.projectId !== currentProject.id) return;
+        if (!hs.targetSize) return;
+
+        if (currentCanvasSize.width === hs.targetSize.width && currentCanvasSize.height === hs.targetSize.height) {
+            hydrationStateRef.current = { projectId: currentProject.id, ready: true, targetSize: null };
+        }
+    }, [currentView, currentProject?.id, currentCanvasSize.width, currentCanvasSize.height]);
 
     // Auto-save layers 3 s after the last change while on the canvas view
     useEffect(() => {
         if (currentView !== 'canvas' || !currentProject) return;
+        if (!hydrationStateRef.current.ready || hydrationStateRef.current.projectId !== currentProject.id) return;
         const tid = setTimeout(() => { void _saveProject(canvasName); }, 3000);
         return () => clearTimeout(tid);
     }, [layers]);
@@ -207,6 +277,7 @@ function App() {
     // Save canvas dimensions too, even when only size changes.
     useEffect(() => {
         if (currentView !== 'canvas' || !currentProject) return;
+        if (!hydrationStateRef.current.ready || hydrationStateRef.current.projectId !== currentProject.id) return;
         const tid = setTimeout(() => { void _saveProject(canvasName); }, 1200);
         return () => clearTimeout(tid);
     }, [currentCanvasSize.width, currentCanvasSize.height]);
@@ -245,8 +316,32 @@ function App() {
         if (!currentProject) return;
         const name = (nameOverride || canvasName || '').trim() || 'Untitled Design';
         const thumbnail = layers.find(l => l.thumbnail)?.thumbnail || null;
-        const canvasWidth = currentCanvasSize?.width || 1024;
-        const canvasHeight = currentCanvasSize?.height || 1024;
+        const liveCanvasSize = canvasRef.current?.getCanvasSize?.();
+        const hydrationReady = hydrationStateRef.current.ready && hydrationStateRef.current.projectId === currentProject.id;
+        const hydrationTarget = hydrationStateRef.current.targetSize;
+        let canvasWidth = hydrationReady
+            ? (liveCanvasSize?.width || currentCanvasSize?.width || 1024)
+            : (hydrationTarget?.width || savedCanvasSize?.width || liveCanvasSize?.width || currentCanvasSize?.width || 1024);
+        let canvasHeight = hydrationReady
+            ? (liveCanvasSize?.height || currentCanvasSize?.height || 1024)
+            : (hydrationTarget?.height || savedCanvasSize?.height || liveCanvasSize?.height || currentCanvasSize?.height || 1024);
+
+        // Canonical rule: if a reference layer exists, its true content size defines project canvas size.
+        const referenceLayer = layers.find((l) => l?.type === 'reference');
+        const refBoundsW = Number(referenceLayer?.bounds?.width);
+        const refBoundsH = Number(referenceLayer?.bounds?.height);
+        if (Number.isFinite(refBoundsW) && Number.isFinite(refBoundsH) && refBoundsW > 0 && refBoundsH > 0) {
+            canvasWidth = Math.round(refBoundsW);
+            canvasHeight = Math.round(refBoundsH);
+        } else if (referenceLayer?.canvasData) {
+            const dims = await getImageDimensions(referenceLayer.canvasData);
+            if (dims?.width && dims?.height) {
+                canvasWidth = dims.width;
+                canvasHeight = dims.height;
+            }
+        }
+
+        // Do not rewrite local saved size during autosave; it can trigger delayed visual snap-backs.
         try {
             await projectService.saveProject(currentProject.id, { name, thumbnail, layers, activeLayerId, canvasWidth, canvasHeight });
         } catch (err) {
@@ -257,9 +352,62 @@ function App() {
         }
     };
 
+    const buildNextUntitledName = (projects = []) => {
+        const baseName = 'Untitled Design';
+        const re = /^untitled design(?:\s+(\d+))?$/i;
+        const used = new Set();
+
+        projects.forEach((p) => {
+            const name = (p?.name || '').trim();
+            const match = name.match(re);
+            if (!match) return;
+            if (!match[1]) {
+                used.add(1);
+                return;
+            }
+            const n = Number(match[1]);
+            if (Number.isFinite(n) && n > 0) used.add(n);
+        });
+
+        if (!used.has(1)) return baseName;
+
+        let suffix = 2;
+        while (used.has(suffix)) suffix += 1;
+        return `${baseName} ${suffix}`;
+    };
+
     const handleNewProject = async () => {
         try {
-            const proj = await projectService.createProject('Untitled Design');
+            let knownProjects = userProjects;
+            try {
+                knownProjects = await projectService.getProjects();
+                setUserProjects(knownProjects);
+            } catch {
+                // Fall back to currently loaded home list if refresh fails.
+            }
+
+            let projectName = buildNextUntitledName(knownProjects);
+            let proj = null;
+
+            for (let attempt = 0; attempt < 6; attempt += 1) {
+                try {
+                    proj = await projectService.createProject(projectName);
+                    break;
+                } catch (err) {
+                    const isNameConflict = /already exists/i.test(err?.message || '');
+                    if (!isNameConflict) throw err;
+
+                    knownProjects = await projectService.getProjects();
+                    setUserProjects(knownProjects);
+                    projectName = buildNextUntitledName(knownProjects);
+                }
+            }
+
+            if (!proj) {
+                throw new Error('Failed to create a unique untitled project name');
+            }
+
+            hydrationStateRef.current = { projectId: proj.id, ready: true, targetSize: null };
             setCurrentProject(proj);
             setCanvasName(proj.name);
             setSavedCanvasSize(null);
@@ -277,6 +425,29 @@ function App() {
         img.src = src;
     });
 
+    const sanitizeSnapshotCanvasSize = (snapshotRaw) => {
+        if (!snapshotRaw) return null;
+        try {
+            const parsed = JSON.parse(snapshotRaw);
+            const refLayer = (parsed?.layers || []).find((l) => l?.type === 'reference');
+            const bw = Number(refLayer?.bounds?.width);
+            const bh = Number(refLayer?.bounds?.height);
+            if (Number.isFinite(bw) && Number.isFinite(bh) && bw > 0 && bh > 0) {
+                return { width: Math.round(bw), height: Math.round(bh) };
+            }
+
+            const cw = Number(parsed?.canvasWidth);
+            const ch = Number(parsed?.canvasHeight);
+            if (Number.isFinite(cw) && Number.isFinite(ch) && cw > 0 && ch > 0) {
+                return { width: Math.round(cw), height: Math.round(ch) };
+            }
+
+            return null;
+        } catch {
+            return null;
+        }
+    };
+
     const normalizeLegacySnapshotSize = async (snapshotRaw) => {
         if (!snapshotRaw) return snapshotRaw;
         try {
@@ -284,15 +455,30 @@ function App() {
             const layersInSnapshot = parsed.layers || [];
             const refLayer = layersInSnapshot.find((l) => l.type === 'reference' && l.canvasData);
             if (refLayer) {
-                const dims = await getImageDimensions(refLayer.canvasData);
-                if (dims) {
-                    // Keep canvas locked to reference dimensions to prevent reopen drift.
-                    parsed.canvasWidth = dims.width;
-                    parsed.canvasHeight = dims.height;
+                // Prefer persisted bounds because they represent actual reference content.
+                const boundsW = Number(refLayer?.bounds?.width);
+                const boundsH = Number(refLayer?.bounds?.height);
+                if (Number.isFinite(boundsW) && Number.isFinite(boundsH) && boundsW > 0 && boundsH > 0) {
+                    parsed.canvasWidth = Math.round(boundsW);
+                    parsed.canvasHeight = Math.round(boundsH);
+                } else {
+                    const dims = await getImageDimensions(refLayer.canvasData);
+                    if (dims) {
+                        // Keep canvas locked to reference dimensions to prevent reopen drift.
+                        parsed.canvasWidth = dims.width;
+                        parsed.canvasHeight = dims.height;
+                    }
                 }
 
                 // Reference layer should stay anchored on reopen.
                 refLayer.transform = { x: 0, y: 0, scale: 1, rotation: 0 };
+                refLayer.locked = true;
+            }
+
+            const sanitizedSize = sanitizeSnapshotCanvasSize(JSON.stringify(parsed));
+            if (sanitizedSize) {
+                parsed.canvasWidth = sanitizedSize.width;
+                parsed.canvasHeight = sanitizedSize.height;
             }
 
             return JSON.stringify(parsed);
@@ -302,6 +488,9 @@ function App() {
     };
 
     const handleOpenProject = async (proj) => {
+        // Avoid carrying size state from the previously-opened project.
+        setSavedCanvasSize(null);
+        hydrationStateRef.current = { projectId: proj.id, ready: false, targetSize: null };
         const fullProject = await projectService.getProject(proj.id);
         const fixedSnapshot = await normalizeLegacySnapshotSize(fullProject.layersSnapshot);
         setCurrentProject({ ...fullProject, layersSnapshot: fixedSnapshot });

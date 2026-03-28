@@ -192,6 +192,11 @@ const MultiLayerCanvas = forwardRef(({
             selectionRef.current = null;
             setSelectionActive(false);
         }
+
+        // Defensive: never carry move/resize transform state into non-transform tools.
+        if (activeTool !== 'transform' && (transformState?.mode === 'move' || transformState?.mode === 'resize')) {
+            setTransformState(null);
+        }
     }, [activeTool, activeLayerId]);
 
     // Unified overlay: always redraws the correct overlay content when anything relevant changes.
@@ -825,6 +830,10 @@ const MultiLayerCanvas = forwardRef(({
     // ─────────────────────────────────────────────────────────────────────────
 
     const startDrawing = (e) => {
+        if (activeTool !== 'transform' && (transformState?.mode === 'move' || transformState?.mode === 'resize')) {
+            setTransformState(null);
+        }
+
         // If text input is open and user clicks outside it, commit the text and eat the click
         if (textInput.visible) {
             if (textInput.value.trim()) {
@@ -1267,6 +1276,12 @@ const MultiLayerCanvas = forwardRef(({
         }
 
         if (transformState && activeLayerId) {
+            const isLayerTransformInteraction = transformState.mode === 'move' || transformState.mode === 'resize';
+            if (isLayerTransformInteraction && activeTool !== 'transform') {
+                setTransformState(null);
+                return;
+            }
+
             e.preventDefault();
 
             if (transformState.mode === 'move') {
