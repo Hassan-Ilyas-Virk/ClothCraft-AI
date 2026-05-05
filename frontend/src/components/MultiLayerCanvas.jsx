@@ -1546,7 +1546,14 @@ const MultiLayerCanvas = forwardRef(({
                     URL.revokeObjectURL(url);
 
                     // Calculate bounds for the new image
-                    const bounds = getContentBounds(tempCanvas);
+                    // For reference images (shouldResizeCanvas) OR if we are updating the reference layer,
+                    // use full image dimensions so the canvas isn't shrunk to just the visible pixels.
+                    const layer = layers.find(l => l.id === layerId);
+                    const isReferenceLayer = layer && layer.type === 'reference';
+                    
+                    const bounds = (shouldResizeCanvas || isReferenceLayer)
+                        ? { x: 0, y: 0, width: targetWidth, height: targetHeight }
+                        : getContentBounds(tempCanvas);
 
                     updateLayerThumbnail(layerId, newDataUrl);
                     // Also update bounds immediately
@@ -1614,6 +1621,8 @@ const MultiLayerCanvas = forwardRef(({
                     ? 'text'
                     : activeTool === 'zoom'
                     ? 'zoom-in'
+                    : activeTool === 'transform'
+                    ? 'default'
                     : ['select', 'lasso', 'shape-rect', 'shape-circle'].includes(activeTool)
                     ? 'crosshair'
                     : 'none'

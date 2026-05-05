@@ -24,7 +24,14 @@ export async function apiRequest(path, options = {}) {
   const payload = await parseJsonResponse(response);
 
   if (!response.ok) {
-    const message = payload?.detail || payload?.message || 'Request failed';
+    let message = 'Request failed';
+    if (Array.isArray(payload?.detail)) {
+      message = payload.detail.map(err => err.msg).join(', ');
+    } else if (payload?.detail) {
+      message = payload.detail;
+    } else if (payload?.message) {
+      message = payload.message;
+    }
     throw new Error(message);
   }
 

@@ -15,12 +15,13 @@ import {
 import './MoodboardModal.css';
 
 const MoodboardModal = ({ onClose, onApply }) => {
-    const [image, setImage] = useState(null);
+    const [image, setImage] = useState(null);       // Only set for uploaded images
     const [colors, setColors] = useState([]);
     const [prompt, setPrompt] = useState('');
     const [status, setStatus] = useState('');
     const [isProcessing, setIsProcessing] = useState(false);
     const [activeOption, setActiveOption] = useState(null); // 'upload' or 'ai'
+    const [aiDone, setAiDone] = useState(false);    // True after successful AI generation
     const fileInputRef = useRef(null);
 
     const handleImageUpload = (e) => {
@@ -51,15 +52,20 @@ const MoodboardModal = ({ onClose, onApply }) => {
     const handleAISuggest = async () => {
         if (!prompt) return;
         setActiveOption('ai');
+        setAiDone(false);
+        setImage(null);   // Clear any previous upload preview
+        setColors([]);
         setIsProcessing(true);
         setStatus('AI is analyzing the aesthetic...');
         try {
             const blob = await suggestColors(prompt);
             setStatus('Distilling palette...');
+            
+            // Use blob only for color extraction — DO NOT show the raw palette strip PNG
             const img = await blobToImage(blob);
-            setImage(img.src);
             const extracted = extractDominantColors(img, 4);
             setColors(extracted);
+            setAiDone(true);
         } catch (error) {
             console.error('AI Suggestion failed:', error);
             alert('AI color suggestion failed. Please try again.');
@@ -157,8 +163,9 @@ const MoodboardModal = ({ onClose, onApply }) => {
                         <div className="section-title">Analysis & Palette</div>
                         
                         <div className="preview-container">
-                            {image ? (
-                                <>
+                            {/* Uploaded image — show the actual photo */}
+                            {activeOption === 'upload' && image && (
+                                <div style={{ position: 'relative' }}>
                                     <img src={image} alt="Source" className="main-preview-v2" />
                                     {isProcessing && (
                                         <div className="loading-overlay">
@@ -166,8 +173,28 @@ const MoodboardModal = ({ onClose, onApply }) => {
                                             <span>{status}</span>
                                         </div>
                                     )}
-                                </>
-                            ) : (
+                                </div>
+                            )}
+
+                            {/* AI processing spinner */}
+                            {activeOption === 'ai' && isProcessing && (
+                                <div className="empty-state">
+                                    <div className="moodboard-spinner-v2" style={{ margin: '0 auto 12px' }}></div>
+                                    <p>{status}</p>
+                                </div>
+                            )}
+
+                            {/* AI success — show a clean generated badge instead of raw PNG */}
+                            {activeOption === 'ai' && aiDone && !isProcessing && (
+                                <div className="empty-state" style={{ gap: '8px' }}>
+                                    <Sparkles size={40} style={{ color: 'var(--accent, #7c3aed)', opacity: 0.85 }} />
+                                    <p style={{ fontWeight: 600, margin: 0 }}>Palette generated for</p>
+                                    <p style={{ color: 'var(--accent, #7c3aed)', fontWeight: 700, margin: 0, fontSize: '1rem' }}>"{prompt}"</p>
+                                </div>
+                            )}
+
+                            {/* Default empty state */}
+                            {!activeOption && (
                                 <div className="empty-state">
                                     <MousePointerClick size={48} className="pulse-icon" />
                                     <p>Choose a source on the left to extract its color profile</p>

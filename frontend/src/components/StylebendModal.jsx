@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, SlidersHorizontal, ImagePlus, Sparkles } from 'lucide-react';
+import { X, SlidersHorizontal, ImagePlus, Sparkles, Wand2 } from 'lucide-react';
 import { blendStyles } from '../utils/imageProcessing';
 import './ProgressBar.css';
 
@@ -13,7 +13,9 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
     const [outpaint2, setOutpaint2] = useState(false);
 
     const [isGenerating, setIsGenerating] = useState(false);
+    const [isRefining, setIsRefining] = useState(false);
     const [resultUrl, setResultUrl] = useState(null);
+    const [refinedUrl, setRefinedUrl] = useState(null);
     const [frames, setFrames] = useState([]);
     const [progress, setProgress] = useState(0);
     const [status, setStatus] = useState('');
@@ -106,10 +108,43 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
         }
     };
 
-    const handleApply = () => {
-        if (resultUrl && onApply) {
+    const handleApply = async () => {
+        if (!resultUrl || !onApply) return;
+
+        setIsRefining(true);
+        setStatus('Refining with Stable Diffusion...');
+        try {
+            // Fetch the current result (base64 data URL) and convert to a blob
+            const res = await fetch(resultUrl);
+            const blob = await res.blob();
+
+            const formData = new FormData();
+            formData.append('image', blob, 'stylebend_result.png');
+            formData.append('strength', '0.35');
+
+            const refineRes = await fetch('http://127.0.0.1:5001/refine-stylebend', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!refineRes.ok) {
+                throw new Error(`Refinement failed: ${refineRes.status}`);
+            }
+
+            const refinedBlob = await refineRes.blob();
+            const refinedObjectUrl = URL.createObjectURL(refinedBlob);
+            setRefinedUrl(refinedObjectUrl);
+
+            // Apply the refined result to the canvas
+            onApply(refinedObjectUrl);
+            onClose();
+        } catch (err) {
+            console.error('Refinement failed, applying unrefined result:', err);
+            // Fallback: apply original StyleGAN result without refinement
             onApply(resultUrl);
             onClose();
+        } finally {
+            setIsRefining(false);
         }
     };
 
@@ -255,9 +290,9 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
                     {/* Result */}
                     {resultUrl && !isGenerating && (
                         <div style={{
-                            marginTop: '1.5rem', height: '420px', display: 'flex',
+                            marginTop: '1.5rem', height: '550px', display: 'flex',
                             alignItems: 'center', justifyContent: 'center',
-                            background: '#f9fafb', border: '1px solid #e5e7eb',
+                            background: '#ffffff', border: '1px solid #e5e7eb',
                             borderRadius: '8px', overflow: 'hidden'
                         }}>
                             <img
@@ -285,9 +320,24 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
                     >
                         <Sparkles size={16} /> {resultUrl ? 'Re-Blend' : 'Blend'}
                     </button>
-                    {resultUrl && (
-                        <button className="clothify-footer-btn clothify-footer-btn-ok" onClick={handleApply}>
-                            Apply to Canvas
+                    {resultUrl && !isGenerating && (
+                        <button
+                            className="clothify-footer-btn clothify-footer-btn-ok"
+                            onClick={handleApply}
+                            disabled={isRefining}
+                            style={{ display: 'flex', alignItems: 'center', gap: '8px', opacity: isRefining ? 0.7 : 1 }}
+                        >
+                            {isRefining ? (
+                                <>
+                                    <Wand2 size={16} className="spin" />
+                                    Refining...
+                                </>
+                            ) : (
+                                <>
+                                    <Wand2 size={16} />
+                                    Refine & Apply
+                                </>
+                            )}
                         </button>
                     )}
                 </div>

@@ -154,11 +154,18 @@ export async function compositeTranslatedDoodleOnReference(referenceBlob, transl
 
       let pixelsComposited = 0;
       let blackBackgroundSkipped = 0;
+      let edgeBlended = 0;
+
+      // Thresholds
+      const BLACK_THRESHOLD = 50;    // Pixels darker than this are considered Pix2Pix background
+      const DARK_THRESHOLD = 40;     // Brightness below this is considered a dark artifact
+      const EDGE_ALPHA_MIN = 30;     // Below this alpha, skip entirely
+      const EDGE_ALPHA_SOFT = 200;   // Below this alpha, blend with reference (feather zone)
 
       for (let i = 0; i < doodleData.data.length; i += 4) {
         const originalAlpha = doodleData.data[i + 3];
 
-        if (originalAlpha > 10) {
+        if (originalAlpha > EDGE_ALPHA_MIN) {
           // Original doodle exists at this location
 
           // Check if original doodle was black/dark
@@ -171,22 +178,39 @@ export async function compositeTranslatedDoodleOnReference(referenceBlob, transl
           const transR = translatedData.data[i];
           const transG = translatedData.data[i + 1];
           const transB = translatedData.data[i + 2];
-          const translatedIsBlack = transR < 20 && transG < 20 && transB < 20;
+          const translatedIsBlack = transR < BLACK_THRESHOLD && transG < BLACK_THRESHOLD && transB < BLACK_THRESHOLD;
+
+          // Also check brightness for near-black dark artifacts
+          const brightness = (transR * 0.299 + transG * 0.587 + transB * 0.114);
+          const translatedIsDark = brightness < DARK_THRESHOLD;
 
           // Decision logic:
           // - If original doodle WAS black → keep translated pixel even if black (it's content)
-          // - If original doodle was NOT black → skip very black pixels (they're background from Pix2Pix)
-          if (translatedIsBlack && !originalWasBlack) {
-            // This is black background from Pix2Pix, not actual content
+          // - If original doodle was NOT black → skip black/dark pixels (Pix2Pix artifacts)
+          if ((translatedIsBlack || translatedIsDark) && !originalWasBlack) {
+            // This is black/dark background from Pix2Pix, not actual content
             // Skip it (keep reference image)
             blackBackgroundSkipped++;
           } else {
-            // This is actual doodle content - use it
-            compositeData.data[i] = transR;
-            compositeData.data[i + 1] = transG;
-            compositeData.data[i + 2] = transB;
+            // This is actual doodle content - blend it
+
+            // Edge feathering: use original alpha to create smooth transition
+            // Pixels near the doodle edge (lower alpha) get blended with reference
+            const blendFactor = originalAlpha >= EDGE_ALPHA_SOFT
+              ? 1.0
+              : (originalAlpha - EDGE_ALPHA_MIN) / (EDGE_ALPHA_SOFT - EDGE_ALPHA_MIN);
+
+            const refR = compositeData.data[i];
+            const refG = compositeData.data[i + 1];
+            const refB = compositeData.data[i + 2];
+
+            compositeData.data[i]     = Math.round(refR * (1 - blendFactor) + transR * blendFactor);
+            compositeData.data[i + 1] = Math.round(refG * (1 - blendFactor) + transG * blendFactor);
+            compositeData.data[i + 2] = Math.round(refB * (1 - blendFactor) + transB * blendFactor);
             compositeData.data[i + 3] = 255;
-            pixelsComposited++;
+
+            if (blendFactor < 1.0) edgeBlended++;
+            else pixelsComposited++;
           }
         }
         // Otherwise keep reference image (already drawn)
@@ -196,6 +220,7 @@ export async function compositeTranslatedDoodleOnReference(referenceBlob, transl
 
       console.log('✓ Composited: Reference + Translated Doodle');
       console.log(`  - Doodle pixels used: ${pixelsComposited}`);
+      console.log(`  - Edge-blended pixels: ${edgeBlended}`);
       console.log(`  - Black background pixels skipped: ${blackBackgroundSkipped}`);
 
       // Convert to blob

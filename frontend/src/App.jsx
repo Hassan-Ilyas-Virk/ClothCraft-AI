@@ -702,10 +702,13 @@ function App() {
                     await canvasRef.current.loadImageToLayer(referenceLayer.id, blob);
                     
                     // Force a re-render of the thumbnail and canvas state by giving it a fresh object URL
+                    // Ensure the layer's transform is reset to default so it isn't applied twice,
+                    // since canvasRef.current.getLayerBlob already bakes the transform into the pixels!
                     const freshUrl = URL.createObjectURL(blob);
                     updateLayer(referenceLayer.id, {
                         canvasData: freshUrl,
-                        thumbnail: freshUrl
+                        thumbnail: freshUrl,
+                        transform: { x: 0, y: 0, scale: 1 }
                     });
                 }
             }, 50);
@@ -774,18 +777,47 @@ function App() {
             // Fetch the image to get a blob
             const res = await fetch(resultUrl);
             const blob = await res.blob();
-            const objectUrl = URL.createObjectURL(blob);
+            
+            let targetLayer = getReferenceLayer();
+            
+            // If somehow there's no reference layer, fallback to active layer or the first layer
+            if (!targetLayer && layers.length > 0) {
+                targetLayer = layers.find(l => l.id === activeLayerId) || layers[0];
+            }
 
-            // Create a new layer for the blended image
-            const newLayer = addLayer('drawing', `Blended Style`);
-
-            // Update the layer with the object URL
-            updateLayer(newLayer.id, {
-                canvasData: objectUrl,
-                thumbnail: objectUrl
-            });
-
-            console.log('✅ Stylebend result applied to new layer');
+            if (targetLayer) {
+                // Use shouldResizeCanvas=false: the canvas is already sized to the reference image.
+                // We want the StyleGAN result to FIT inside existing canvas bounds, not resize the canvas.
+                setTimeout(async () => {
+                    if (canvasRef.current) {
+                        await canvasRef.current.loadImageToLayer(targetLayer.id, blob, false);
+                        
+                        const freshUrl = URL.createObjectURL(blob);
+                        updateLayer(targetLayer.id, {
+                            canvasData: freshUrl,
+                            thumbnail: freshUrl,
+                            // Standard reset transform
+                            transform: { x: 0, y: 0, scale: 1, rotation: 0 }
+                        });
+                    }
+                }, 50);
+                console.log('✅ Stylebend result applied to target layer');
+            } else {
+                // Absolute fallback: create a new reference layer and resize canvas to image
+                const objectUrl = URL.createObjectURL(blob);
+                const newLayer = addLayer('reference', `Blended Style`);
+                setTimeout(async () => {
+                    if (canvasRef.current) {
+                        await canvasRef.current.loadImageToLayer(newLayer.id, blob, true);
+                        updateLayer(newLayer.id, {
+                            canvasData: objectUrl,
+                            thumbnail: objectUrl,
+                            transform: { x: 0, y: 0, scale: 1, rotation: 0 }
+                        });
+                    }
+                }, 50);
+                console.log('✅ Stylebend result applied to new reference layer');
+            }
         } catch (err) {
             console.error('Error applying Stylebend result:', err);
             setError('Failed to apply Stylebend image to canvas');
@@ -810,7 +842,9 @@ function App() {
                         // Manually trigger the canvasData update since the canvas size shifted
                         updateLayer(refLayer.id, {
                             canvasData: objectUrl,
-                            thumbnail: objectUrl
+                            thumbnail: objectUrl,
+                            // Reset transform
+                            transform: { x: 0, y: 0, scale: 1, rotation: 0 }
                         });
                     }
                 }, 50);
@@ -951,7 +985,7 @@ function App() {
                             ref={canvasRef}
                             layers={layers}
                             activeLayerId={activeLayerId}
-                            brushSize={brushSize}
+                            brushSize={activeTool === 'eraser' ? eraserSize : brushSize}
                             brushColor={brushColor}
                             activeTool={activeTool}
                             onLayerUpdate={handleLayerUpdate}

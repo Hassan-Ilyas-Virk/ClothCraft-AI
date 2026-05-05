@@ -229,7 +229,7 @@ NGF = 64
 NORM_LAYER = torch.nn.BatchNorm2d
 USE_DROPOUT = True
 
-# Stable Diffusion model for inpainting
+# Stable Diffusion model (Realistic Vision — standard SD 1.5, NOT an inpainting checkpoint)
 SD_MODEL_PATH = os.path.join(script_dir, 'models', 'realisticVisionV60B1_v51VAE.safetensors')
 
 # StyleGAN model for style blending
@@ -294,21 +294,29 @@ except Exception as e:
     print(f"⚠️  Error loading Pix2Pix model: {e} — doodle translation disabled.")
     pix2pix_model = None
 
-# Load Stable Diffusion inpainting model for Clothify feature
+# Load Stable Diffusion Img2Img model for Clothify feature
+# Realistic Vision is a standard SD 1.5 model (4-ch), NOT an inpainting model (9-ch),
+# so we must use StableDiffusionImg2ImgPipeline instead of the Inpaint pipeline.
 try:
-    from diffusers import StableDiffusionInpaintPipeline
-    print("Loading Stable Diffusion Inpainting model...")
-    sd_pipe = StableDiffusionInpaintPipeline.from_single_file(
+    from diffusers import StableDiffusionImg2ImgPipeline
+    print("Loading Stable Diffusion Img2Img model...")
+    sd_pipe = StableDiffusionImg2ImgPipeline.from_single_file(
         SD_MODEL_PATH,
         torch_dtype=torch.float16 if device in ["cuda", "mps"] else torch.float32,
-        safety_checker=None
+        safety_checker=None,
+        requires_safety_checker=False
     ).to(device)
+    
+    # Explicitly disable safety checker again (from_single_file can sometimes ignore the kwargs)
+    if hasattr(sd_pipe, 'safety_checker'):
+        sd_pipe.safety_checker = None
+    
     print("✅ Stable Diffusion model loaded successfully!")
 except FileNotFoundError:
-    print(f"⚠️  SD model not found at {SD_MODEL_PATH} — inpainting disabled.")
+    print(f"⚠️  SD model not found at {SD_MODEL_PATH} — img2img disabled.")
     sd_pipe = None
 except Exception as e:
-    print(f"⚠️  Error loading SD model: {e} — inpainting disabled.")
+    print(f"⚠️  Error loading SD model: {e} — img2img disabled.")
     sd_pipe = None
 
 # Load StyleGAN-Human model
@@ -417,7 +425,13 @@ def translate_doodle(doodle_bytes):
     return byte_io
 
 def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", strength=0.75):
-    """Inpaints reference image using Stable Diffusion with the mask"""
+    """Inpaints reference image using Stable Diffusion Img2Img with manual mask compositing.
+    
+    Because we use a standard (non-inpainting) SD model, we simulate inpainting by:
+    1. Adding noise/white to the masked region of the input image
+    2. Running img2img so the model regenerates that region
+    3. Compositing the result back: keep original pixels outside the mask
+    """
     if sd_pipe is None:
         raise Exception("Stable Diffusion model not loaded")
     
@@ -428,7 +442,15 @@ def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", 
     reference_image = Image.new("RGB", original_rgba.size, (255, 255, 255))
     reference_image.paste(original_rgba, mask=original_rgba.split()[3])
 
-    mask_image = Image.open(io.BytesIO(mask_bytes)).convert('L')  # Grayscale mask
+    # The mask passed here is the Pix2Pix output (RGB with black background).
+    # If we simply convert to Grayscale ('L'), colors like red or cyan become gray,
+    # causing transparency in the mask and creating a "fade" or ghosting effect.
+    # Instead, we threshold it: any pixel that isn't black becomes solid white in the mask.
+    pix2pix_img = Image.open(io.BytesIO(mask_bytes)).convert('RGB')
+    p2p_np = np.array(pix2pix_img)
+    # Brightness threshold to detect the object vs black background
+    mask_np_raw = (np.max(p2p_np, axis=2) > 20).astype(np.uint8) * 255
+    mask_image = Image.fromarray(mask_np_raw, mode='L')
     
     # Resize to optimal size for SD (512x512 recommended)
     original_size = reference_image.size
@@ -436,8 +458,16 @@ def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", 
     
     # Resize mask with BILINEAR (LANCZOS can create ringing on masks)
     # Then apply a slight Gaussian blur to smooth the transition for the AI
+    # Keep radius small (2) just for anti-aliasing the sharp threshold
     mask_image = mask_image.resize((512, 512), Image.BILINEAR)
-    mask_image = mask_image.filter(ImageFilter.GaussianBlur(radius=4))
+    mask_image = mask_image.filter(ImageFilter.GaussianBlur(radius=2))
+    
+    # --- img2img approach ---
+    # The frontend already composited the Pix2Pix translated doodle onto the
+    # reference image, so `reference_image` already contains the desired design
+    # (e.g. the red shirt) in the masked region.  We pass it directly to img2img
+    # so SD refines/blends what's already there instead of starting from white.
+    mask_np = np.array(mask_image).astype(np.float32) / 255.0  # 0.0–1.0
     
     # Use prompt directly without forcing clothing/fabric keywords
     enhanced_prompt = prompt if prompt else "high quality, detailed"
@@ -445,28 +475,33 @@ def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", 
     # Negative prompt to protect face and maintain quality
     negative_prompt = "face changes, facial features, distorted face, blurry face, deformed face, bad anatomy, low quality, blurry, distorted"
     
-    print(f"🎚️ Inpainting with strength: {strength}")
+    print(f"🎚️ Img2Img inpainting with strength: {strength}")
     print(f"📝 Prompt: {enhanced_prompt}")
     print(f"🚫 Negative prompt: {negative_prompt}")
     
-    # Inpaint with Stable Diffusion
+    # Run img2img directly on the composited reference (already has doodle on it)
     result = sd_pipe(
         prompt=enhanced_prompt,
-        negative_prompt=negative_prompt,  # Tell AI what NOT to do
+        negative_prompt=negative_prompt,
         image=reference_image,
-        mask_image=mask_image,
-        strength=float(strength),  # How much to change (0.0-1.0)
+        strength=float(strength),
         num_inference_steps=50,
         guidance_scale=7.5,
     ).images[0]
     
-    # Resize back to original size and restore the original alpha channel (background cutout)
-    result = result.resize(original_size, Image.LANCZOS).convert('RGBA')
-    result.putalpha(original_rgba.split()[3])
+    # --- Composite back: keep original pixels outside the mask ---
+    ref_np = np.array(reference_image).astype(np.float32)
+    result_np = np.array(result.resize((512, 512), Image.LANCZOS)).astype(np.float32)
+    final_np = ref_np * (1.0 - mask_np[..., None]) + result_np * mask_np[..., None]
+    composited = Image.fromarray(final_np.astype(np.uint8))
+    
+    # Resize back to original size and restore the original alpha channel
+    composited = composited.resize(original_size, Image.LANCZOS).convert('RGBA')
+    composited.putalpha(original_rgba.split()[3])
     
     # Save to byte buffer
     byte_io = io.BytesIO()
-    result.save(byte_io, 'PNG')
+    composited.save(byte_io, 'PNG')
     byte_io.seek(0)
     
     return byte_io
@@ -527,9 +562,11 @@ def outpaint_to_full_body(img_pil):
     # Create white canvas
     canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
 
-    # Center horizontally, align to bottom (feet at the bottom)
+    # Center horizontally, and center vertically.
+    # Bottom-aligning pushes the head too low on 512x768 inputs, which completely 
+    # breaks the StyleGAN perceptual face loss (which targets the top 25% of the canvas).
     x_offset = (canvas_w - new_w) // 2
-    y_offset = canvas_h - new_h  # stick figure to the bottom of canvas
+    y_offset = (canvas_h - new_h) // 2
 
     canvas.paste(scaled_img, (x_offset, y_offset))
 
@@ -653,6 +690,71 @@ async def refine_pattern_endpoint(
         )
         raise HTTPException(status_code=500, detail=str(e))
 
+# Route for refining a StyleGAN blended result with Stable Diffusion
+@app.post('/refine-stylebend')
+async def refine_stylebend_endpoint(
+    image: UploadFile = File(...),
+    strength: str = Form('0.35'),
+):
+    """Refines a StyleGAN blended fashion image using SD img2img.
+    
+    Low strength (0.35) preserves the outfit silhouette/pose from StyleGAN 
+    while adding realistic fabric texture, sharpness and VS visual quality.
+    """
+    if sd_pipe is None:
+        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
+
+    print("✨ Refining StyleGAN output with Stable Diffusion...")
+    start = time.perf_counter()
+    try:
+        image_bytes = await image.read()
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        # Resize to 512x768 — SD 1.5 portrait native resolution
+        img = img.resize((512, 768), Image.LANCZOS)
+
+        prompt = (
+            "fashion model wearing stylish outfit, high quality fabric texture, "
+            "sharp details, professional fashion photography, clean white background, "
+            "full body portrait, photorealistic"
+        )
+        negative_prompt = (
+            "low quality, blurry, distorted, deformed, bad anatomy, extra limbs, "
+            "duplicate, cropped, watermark, text, artifacts, noise"
+        )
+
+        result = sd_pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=img,
+            strength=float(strength),
+            num_inference_steps=30,
+            guidance_scale=7.5,
+        ).images[0]
+
+        byte_io = io.BytesIO()
+        result.save(byte_io, 'PNG')
+        byte_io.seek(0)
+
+        await log_generation_event(
+            endpoint="refine-stylebend",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"strength": strength},
+        )
+        return StreamingResponse(byte_io, media_type='image/png')
+    except Exception as e:
+        print(f"Error refining StyleGAN output: {e}")
+        await log_generation_event(
+            endpoint="refine-stylebend",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"strength": strength},
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Global cache for latents to make slider adjustments instant
 latent_cache = {}
 import hashlib
@@ -760,30 +862,35 @@ async def generate_human_endpoint(
     start = time.perf_counter()
 
     try:
-        # Create a blank white canvas — SD inpainting will replace everything
+        # Create a blank white canvas — img2img with strength=1.0 fully regenerates
         width, height = 512, 768
         blank_image = Image.new("RGB", (width, height), (255, 255, 255))
-        mask_image = Image.new("L", (width, height), 255)  # All-white mask = generate everywhere
 
         result = sd_pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
             image=blank_image,
-            mask_image=mask_image,
             strength=1.0,              # Full generation from noise
             num_inference_steps=int(steps),
             guidance_scale=float(guidance),
         ).images[0]
 
-        # Try to remove the background
+        # Try to remove the background and place on solid white
         try:
             from rembg import remove as rembg_remove
             print("   🪄 Removing background using rembg...")
             img_bytes_io = io.BytesIO()
             result.save(img_bytes_io, format="PNG")
             result_bytes = rembg_remove(img_bytes_io.getvalue())
-            result = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
-            print("   ✅ Background removed successfully.")
+            img_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
+            
+            # Place the cutout (alpha-composited) on a pure WHITE background
+            # This ensures frontend bounds logic doesn't shrink the canvas to the silhouette
+            white_bg = Image.new("RGBA", img_rgba.size, (255, 255, 255, 255))
+            white_bg.paste(img_rgba, mask=img_rgba.split()[3])
+            result = white_bg.convert("RGB")
+            
+            print("   ✅ Background removed and replaced with solid white.")
         except Exception as e:
             print(f"   ⚠️ Background removal failed or not installed ({e}) — keeping original background.")
 
@@ -814,34 +921,157 @@ async def generate_human_endpoint(
 # Route for AI Color Suggestions
 @app.post('/suggest-colors')
 async def suggest_colors_endpoint(prompt: str = Form(...)):
-    """Suggests a color palette from a text prompt using low-step Stable Diffusion"""
-    if sd_pipe is None:
-        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
-    
-    print(f"🎨 Suggesting colors for: {prompt}")
+    """Suggests a color palette from a text prompt using HSL color theory + keyword mapping.
+    Generates clean, accurate swatch strip images directly - no generative AI needed.
+    """
+    import colorsys, hashlib
+    from PIL import ImageDraw
+
+    print(f"\U0001f3a8 Suggesting colors for: {prompt}")
     start = time.perf_counter()
-    
+
     try:
-        # Create a small blank canvas for speed
-        width, height = 256, 256
-        blank_image = Image.new("RGB", (width, height), (255, 255, 255))
-        mask_image = Image.new("L", (width, height), 255)
-        
-        # Guide towards abstract color blobs
-        enhanced_prompt = f"abstract color palette study, vibrant color blobs, {prompt}, high quality"
-        
-        # Low steps for fast "vibe" generation
-        result = sd_pipe(
-            prompt=enhanced_prompt,
-            image=blank_image,
-            mask_image=mask_image,
-            strength=1.0,
-            num_inference_steps=2, 
-            guidance_scale=7.5,
-        ).images[0]
-        
+        # ── Comprehensive keyword → (base_hue, saturation, lightness_min, lightness_max) ──
+        # Emotions are primary. Low sat + low lightness = muted/sad. High sat + high lightness = joyful.
+        HUE_KEYWORDS = [
+            # Sadness / Depression / Grief
+            ("sad", 225, 25, 25, 45), ("sadness", 225, 25, 25, 45),
+            ("lonely", 220, 20, 22, 42), ("loneliness", 220, 20, 22, 42), ("alone", 215, 18, 25, 45),
+            ("depress", 230, 20, 15, 35), ("grief", 220, 22, 18, 35), ("sorrow", 225, 25, 20, 40),
+            ("heartbreak", 340, 30, 22, 42), ("heartbroken", 340, 30, 22, 42),
+            ("melancholy", 225, 22, 25, 45), ("hopeless", 220, 15, 18, 32),
+            ("despair", 225, 18, 12, 30), ("empty", 210, 10, 28, 48),
+            ("numb", 215, 8, 28, 45), ("broken", 215, 18, 20, 38),
+            ("crying", 215, 25, 25, 45), ("tears", 205, 28, 28, 48),
+            ("wistful", 215, 22, 32, 52), ("mournful", 225, 20, 18, 35),
+            ("regret", 220, 22, 25, 42), ("miss", 220, 20, 28, 48),
+            # Happiness / Joy
+            ("happy", 50, 85, 60, 80), ("happiness", 50, 85, 60, 80),
+            ("joy", 45, 90, 62, 82), ("joyful", 45, 90, 62, 82),
+            ("excited", 25, 90, 55, 75), ("cheerful", 50, 80, 65, 82),
+            ("elated", 48, 88, 62, 80), ("bliss", 55, 80, 68, 85),
+            ("euphoria", 40, 92, 60, 78), ("celebrate", 35, 88, 58, 78),
+            ("playful", 45, 85, 62, 80), ("fun", 30, 88, 60, 78),
+            ("laugh", 48, 82, 65, 82), ("bright", 50, 80, 68, 85),
+            ("sunshine", 52, 88, 65, 82), ("radiant", 48, 88, 65, 82),
+            # Anger / Rage
+            ("angry", 0, 85, 35, 55), ("anger", 0, 85, 35, 55),
+            ("rage", 0, 90, 25, 42), ("furious", 5, 88, 28, 45),
+            ("frustrated", 10, 70, 35, 52), ("frustrat", 10, 70, 35, 52),
+            ("hate", 355, 80, 25, 42), ("violent", 0, 88, 22, 40),
+            # Fear / Anxiety
+            ("fear", 250, 35, 18, 38), ("scared", 245, 30, 20, 40),
+            ("anxious", 240, 28, 25, 45), ("anxiety", 240, 30, 22, 42),
+            ("nervous", 235, 25, 28, 48), ("panic", 10, 60, 28, 48),
+            ("dread", 240, 25, 15, 32), ("horror", 240, 20, 12, 28),
+            ("terror", 235, 22, 12, 28), ("stressed", 235, 25, 25, 45),
+            ("stress", 235, 25, 25, 45), ("worried", 235, 22, 28, 48),
+            ("worry", 235, 22, 28, 48),
+            # Calm / Peace
+            ("calm", 195, 40, 55, 75), ("calming", 195, 40, 55, 75),
+            ("peace", 175, 35, 55, 75), ("peaceful", 175, 35, 55, 75),
+            ("serene", 190, 38, 58, 78), ("tranquil", 185, 35, 58, 78),
+            ("relax", 185, 38, 55, 75), ("zen", 145, 30, 50, 70),
+            ("gentle", 185, 30, 62, 80), ("quiet", 210, 18, 48, 68),
+            # Romance / Love
+            ("love", 345, 70, 55, 78), ("loving", 345, 70, 55, 78),
+            ("romantic", 340, 60, 60, 80), ("passion", 350, 85, 45, 65),
+            ("tender", 345, 50, 65, 82), ("heart", 355, 70, 55, 75),
+            # Mystery / Darkness
+            ("myster", 270, 50, 15, 35), ("dark", 240, 20, 10, 28),
+            ("shadow", 235, 18, 12, 30), ("eerie", 260, 35, 18, 35),
+            ("gothic", 280, 40, 12, 30), ("haunted", 250, 25, 15, 32),
+            ("noir", 220, 12, 10, 28), ("sinister", 255, 35, 12, 28),
+            # Hope / Optimism
+            ("hope", 165, 55, 50, 72), ("hopeful", 165, 55, 50, 72),
+            ("dream", 270, 40, 60, 82), ("dreamy", 280, 40, 60, 82),
+            ("inspire", 190, 60, 50, 72), ("ambit", 195, 58, 48, 68),
+            # Energy / Power
+            ("energy", 30, 90, 52, 72), ("power", 270, 70, 28, 52),
+            ("bold", 0, 80, 38, 58), ("fierce", 10, 85, 32, 52),
+            ("intense", 240, 60, 25, 45), ("vibrant", 35, 90, 55, 75),
+            # Nostalgia
+            ("nostalgi", 30, 42, 50, 68), ("memory", 35, 35, 52, 70),
+            ("vintage", 35, 40, 50, 65), ("retro", 28, 55, 48, 68),
+            # Aesthetics
+            ("cyberpunk", 280, 85, 40, 70), ("neon", 290, 90, 50, 75),
+            ("gloomy", 225, 22, 22, 42), ("moody", 235, 28, 22, 42),
+            ("dreary", 220, 18, 20, 38), ("pastel", 300, 30, 75, 90),
+            ("boho", 30, 55, 55, 70), ("ethereal", 270, 35, 65, 85),
+            ("magical", 290, 60, 50, 75), ("fairy", 295, 45, 65, 85),
+            ("elegant", 260, 30, 40, 60), ("luxury", 45, 70, 45, 65),
+            ("minimal", 210, 15, 50, 75), ("futuristic", 200, 70, 40, 65),
+            ("industrial", 210, 20, 28, 48), ("grunge", 35, 30, 22, 42),
+            # Nature
+            ("grass", 110, 55, 35, 65), ("green", 120, 60, 30, 65),
+            ("forest", 130, 50, 25, 55), ("ocean", 200, 75, 35, 65),
+            ("sky", 205, 70, 50, 80), ("sea", 195, 70, 35, 65),
+            ("sunset", 20, 85, 50, 70), ("fire", 10, 90, 45, 65),
+            ("autumn", 25, 80, 45, 65), ("snow", 210, 20, 85, 95),
+            ("winter", 220, 38, 42, 62), ("spring", 90, 55, 55, 75),
+            ("summer", 50, 70, 60, 80), ("tropical", 165, 70, 45, 65),
+            ("desert", 35, 65, 55, 75), ("mountain", 220, 25, 35, 55),
+            ("earth", 30, 45, 35, 55), ("mint", 160, 55, 60, 80),
+            # Direct colors
+            ("red", 0, 80, 40, 65), ("pink", 340, 70, 65, 85),
+            ("rose", 350, 65, 55, 75), ("orange", 25, 85, 50, 70),
+            ("yellow", 55, 85, 55, 75), ("gold", 45, 80, 50, 65),
+            ("purple", 275, 70, 35, 60), ("violet", 265, 75, 40, 65),
+            ("lavender", 260, 50, 70, 85), ("indigo", 245, 70, 35, 55),
+            ("blue", 215, 75, 40, 65), ("navy", 225, 65, 25, 45),
+            ("teal", 175, 65, 35, 55), ("cyan", 185, 75, 45, 65),
+            ("brown", 25, 50, 30, 50), ("beige", 35, 40, 70, 85),
+            ("gray", 220, 10, 40, 65), ("grey", 220, 10, 40, 65),
+            ("charcoal", 220, 15, 15, 30), ("black", 240, 10, 8, 20),
+            ("white", 0, 0, 88, 97), ("silver", 215, 15, 65, 80),
+        ]
+
+        prompt_lower = prompt.lower()
+        matched = []
+        for kw, hue, sat, lmin, lmax in HUE_KEYWORDS:
+            if kw in prompt_lower:
+                matched.append((hue, sat, lmin, lmax))
+
+        if not matched:
+            h = int(hashlib.md5(prompt_lower.encode()).hexdigest(), 16)
+            base_hue = h % 360
+            matched.append((base_hue, 45, 35, 62))
+
+        # Blend all matched keywords into one unified emotional base
+        avg_hue = sum(m[0] for m in matched) / len(matched)
+        avg_sat = sum(m[1] for m in matched) / len(matched)
+        avg_lmin = sum(m[2] for m in matched) / len(matched)
+        avg_lmax = sum(m[3] for m in matched) / len(matched)
+        base_hue = int(avg_hue)
+        sat = int(avg_sat)
+        lmin = int(avg_lmin)
+        lmax = int(avg_lmax)
+
+        # Analogous harmony spanning the emotional lightness range
+        NUM_SWATCHES = 5
+        offsets = [0, 12, -12, 22, -22]
+        swatches = []
+        for j, offset in enumerate(offsets):
+            hue = (base_hue + offset) % 360
+            lightness = lmin + (lmax - lmin) * (j / (NUM_SWATCHES - 1))
+            s = max(8, min(95, sat + (j - 2) * 4))
+            swatches.append((hue, s, lightness))
+        # Render as a clean palette strip PNG
+        sw, sh, pad = 110, 110, 12
+        total_w = NUM_SWATCHES * sw + (NUM_SWATCHES + 1) * pad
+        total_h = sh + 2 * pad
+        palette_img = Image.new("RGB", (total_w, total_h), (240, 240, 245))
+        draw = ImageDraw.Draw(palette_img)
+
+        for i, (h, s, l) in enumerate(swatches[:NUM_SWATCHES]):
+            r, g, b = colorsys.hls_to_rgb(h / 360, l / 100, s / 100)
+            rgb = (int(r * 255), int(g * 255), int(b * 255))
+            x = pad + i * (sw + pad)
+            y = pad
+            draw.rectangle([x, y, x + sw, y + sh], fill=rgb)
+
         byte_io = io.BytesIO()
-        result.save(byte_io, 'PNG')
+        palette_img.save(byte_io, 'PNG')
         byte_io.seek(0)
         await log_generation_event(
             endpoint="suggest-colors",
