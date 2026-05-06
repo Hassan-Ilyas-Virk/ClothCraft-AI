@@ -1,6 +1,6 @@
 import torch
 import io
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Response, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Response, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, EmailStr
@@ -297,20 +297,35 @@ except Exception as e:
 # Load Stable Diffusion Img2Img model for Clothify feature
 # Realistic Vision is a standard SD 1.5 model (4-ch), NOT an inpainting model (9-ch),
 # so we must use StableDiffusionImg2ImgPipeline instead of the Inpaint pipeline.
+txt2img_pipe = None
 try:
-    from diffusers import StableDiffusionImg2ImgPipeline
-    print("Loading Stable Diffusion Img2Img model...")
+    from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionPipeline
+    print("Loading Stable Diffusion model...")
     sd_pipe = StableDiffusionImg2ImgPipeline.from_single_file(
         SD_MODEL_PATH,
         torch_dtype=torch.float16 if device in ["cuda", "mps"] else torch.float32,
         safety_checker=None,
         requires_safety_checker=False
     ).to(device)
-    
-    # Explicitly disable safety checker again (from_single_file can sometimes ignore the kwargs)
+
     if hasattr(sd_pipe, 'safety_checker'):
         sd_pipe.safety_checker = None
-    
+
+    # Build a txt2img pipeline that shares all the same model weights (no extra VRAM).
+    # img2img with any initial image always encodes that image through the VAE first,
+    # which biases generation toward the input's colors even at strength=1.0.
+    # A proper txt2img pipeline starts from pure scheduler noise with no image latent.
+    txt2img_pipe = StableDiffusionPipeline(
+        vae=sd_pipe.vae,
+        text_encoder=sd_pipe.text_encoder,
+        tokenizer=sd_pipe.tokenizer,
+        unet=sd_pipe.unet,
+        scheduler=sd_pipe.scheduler,
+        safety_checker=None,
+        feature_extractor=getattr(sd_pipe, 'feature_extractor', None),
+        requires_safety_checker=False,
+    )
+
     print("✅ Stable Diffusion model loaded successfully!")
 except FileNotFoundError:
     print(f"⚠️  SD model not found at {SD_MODEL_PATH} — img2img disabled.")
@@ -365,51 +380,51 @@ async def log_generation_event(
 
 
 
-def translate_doodle(doodle_bytes):
-    """Translates doodle using Pix2Pix model"""
+def translate_doodle(doodle_bytes, return_rgba=False):
+    """Translates doodle using Pix2Pix model.
+
+    return_rgba=True  → returns an RGBA PNG (real transparency from rembg).
+                        Used by the live preview — no brightness stripping needed,
+                        works correctly for dark colours.
+    return_rgba=False → composites onto black and returns RGB PNG (legacy behaviour
+                        used by Clothify's per-pixel compositing logic).
+    """
     print("🎨 Running Pix2Pix doodle translation...")
-    
-    # Load original image
+
     original = Image.open(io.BytesIO(doodle_bytes))
-    
-    # If image has an alpha channel, composite it onto a WHITE background
-    # This is CRITICAL because the Pix2Pix model was trained on white-background sketches.
-    # PIL's default .convert('RGB') makes transparent areas BLACK, which the model doesn't understand.
+
     if original.mode == 'RGBA':
         image = Image.new("RGB", original.size, (255, 255, 255))
         image.paste(original, mask=original.split()[3])
     else:
         image = original.convert('RGB')
-        
+
     input_tensor = transform(image).unsqueeze(0).to(device)
 
     with torch.no_grad():
         output_tensor = pix2pix_model(input_tensor)
 
-    # De-normalize the output tensor from [-1, 1] to [0, 1]
     output_image = output_tensor.squeeze(0).cpu()
     output_image = (output_image * 0.5) + 0.5
-    
-    # Convert tensor back to a PIL Image
     output_image = transforms.ToPILImage()(output_image)
 
-    # --- POST-PROCESSING ---
-    # The Pix2Pix model often produces a light gray background [~180, 180, 180].
-    # The frontend expects a BLACK background to correctly composite the result.
-    # We use rembg to remove the gray background and place the object on black.
     try:
         from rembg import remove as rembg_remove
         print("   🪄 Removing Pix2Pix background using rembg...")
-        
-        # Convert to PNG bytes for rembg
+
         temp_io = io.BytesIO()
         output_image.save(temp_io, format="PNG")
-        
-        # Remove background
         result_bytes = rembg_remove(temp_io.getvalue())
         output_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
-        
-        # Composite onto BLACK background (required by frontend skip-black logic)
+
+        if return_rgba:
+            # Return real alpha channel — frontend composites with source-over, no stripping.
+            byte_io = io.BytesIO()
+            output_rgba.save(byte_io, 'PNG')
+            byte_io.seek(0)
+            return byte_io
+
+        # Legacy: composite onto black for Clothify's skip-black pixel logic.
         black_bg = Image.new("RGBA", output_rgba.size, (0, 0, 0, 255))
         black_bg.paste(output_rgba, mask=output_rgba.split()[3])
         output_image = black_bg.convert("RGB")
@@ -417,11 +432,9 @@ def translate_doodle(doodle_bytes):
     except Exception as e:
         print(f"   ⚠️ Background cleanup failed ({e}) — returning raw model output.")
 
-    # Save image to a byte buffer to send as response
     byte_io = io.BytesIO()
     output_image.save(byte_io, 'PNG')
     byte_io.seek(0)
-    
     return byte_io
 
 def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", strength=0.75):
@@ -577,12 +590,15 @@ def outpaint_to_full_body(img_pil):
 
 # Route for translating doodle with Pix2Pix
 @app.post('/translate-doodle')
-async def translate_doodle_endpoint(file: UploadFile = File(...)):
+async def translate_doodle_endpoint(
+    file: UploadFile = File(...),
+    rgba: bool = Query(False, description="Return RGBA PNG with real transparency instead of black-background RGB"),
+):
     """Translates doodle using Pix2Pix model"""
     start = time.perf_counter()
     try:
         img_bytes = await file.read()
-        result_bytes = translate_doodle(img_bytes)
+        result_bytes = translate_doodle(img_bytes, return_rgba=rgba)
         await log_generation_event(
             endpoint="translate-doodle",
             status="success",
@@ -846,15 +862,63 @@ async def blend_styles(
 async def generate_human_endpoint(
     prompt: str = Form('a fashion model wearing stylish clothing, full body, high quality, detailed'),
     negative_prompt: str = Form('low quality, blurry, distorted, deformed, bad anatomy, extra limbs, ugly'),
-    steps: str = Form('50'),
+    steps: str = Form('35'),
     guidance: str = Form('7.5'),
 ):
     """Generates a human figure from a text prompt using Stable Diffusion"""
-    if sd_pipe is None:
+    if txt2img_pipe is None:
         raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
 
-    prompt = prompt + ", pure white background, white backdrop, clean studio"
-    negative_prompt = negative_prompt + ", complex background, messy background, outdoors, scenery, landscape"
+    _COLOR_RE = re.compile(
+        r'\b(black|white|red|blue|green|yellow|purple|pink|orange|brown|gr[ae]y|navy|'
+        r'burgundy|maroon|teal|cyan|magenta|beige|cream|gold|silver|dark|light|bright|'
+        r'pastel|neon|olive|coral|turquoise|indigo|violet|crimson|scarlet|azure|ivory|'
+        r'charcoal|tan|khaki|lime)\b',
+        re.IGNORECASE,
+    )
+    _DARK_COLORS = {
+        'black', 'dark', 'navy', 'charcoal', 'burgundy', 'maroon',
+        'indigo', 'violet', 'crimson', 'scarlet', 'teal', 'olive',
+    }
+
+    color_hits = list(dict.fromkeys(m.lower() for m in _COLOR_RE.findall(prompt)))
+
+    if color_hits:
+        # Anchor each colour to a clothing noun before repeating.
+        # Bare colour words ("black, black, black") get applied to whatever the model
+        # associates first — usually skin or hair. Pairing with a clothing noun
+        # ("black clothing, black clothing, …") locks the colour to the garment.
+        # We also try to extract the specific clothing item from the user's prompt
+        # (e.g. "suit", "dress") so the repetition is even more precise.
+        _GARMENT_RE = re.compile(
+            r'\b(suit|dress|gown|jacket|coat|shirt|pants|trousers|blouse|skirt|'
+            r'jeans|blazer|hoodie|sweater|uniform|robe|outfit|attire|top|wear)\b',
+            re.IGNORECASE,
+        )
+        garment_match = _GARMENT_RE.search(prompt)
+        garment = garment_match.group(1).lower() if garment_match else 'clothing'
+
+        anchored = [f"{c} {garment}" for c in color_hits[:2]]
+        repeated_colors = ', '.join(phrase for phrase in anchored for _ in range(4))
+        prompt = repeated_colors + ', ' + prompt
+
+    # For dark colours, push white/light tones away via the negative prompt.
+    dark_found = [c for c in color_hits if c in _DARK_COLORS]
+    if dark_found:
+        negative_prompt = (
+            "white clothing, white dress, white shirt, white suit, white outfit, "
+            "light colored clothing, pale outfit, bright clothing, "
+            + negative_prompt
+        )
+
+    prompt = prompt + ", professional fashion photography, photorealistic, sharp focus"
+    negative_prompt = (
+        negative_prompt
+        + ", outdoors, complex background, scenery, landscape, "
+        + "extra limbs, extra arms, extra legs, missing limbs, floating limbs, "
+        + "duplicate, cloned face, disfigured, gross proportions, mutation, "
+        + "watermark, text, signature, jpeg artifacts"
+    )
 
     print(f"🧑 Starting Text-to-Human Generation...")
     print(f"📝 Prompt: {prompt}")
@@ -862,17 +926,14 @@ async def generate_human_endpoint(
     start = time.perf_counter()
 
     try:
-        # Create a blank white canvas — img2img with strength=1.0 fully regenerates
         width, height = 512, 768
-        blank_image = Image.new("RGB", (width, height), (255, 255, 255))
-
-        result = sd_pipe(
+        result = txt2img_pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
-            image=blank_image,
-            strength=1.0,              # Full generation from noise
             num_inference_steps=int(steps),
             guidance_scale=float(guidance),
+            width=width,
+            height=height,
         ).images[0]
 
         # Try to remove the background and place on solid white

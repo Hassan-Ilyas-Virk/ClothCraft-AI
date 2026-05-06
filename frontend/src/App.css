@@ -204,6 +204,29 @@ body {
   background-size: 20px 20px;
 }
 
+/* ── Live Preview split layout ──────────────────────────────────── */
+.app-canvas-area.live-mode {
+  flex-direction: row;
+  align-items: stretch;
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+.live-canvas-side {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  background-color: #ffffff;
+  background-image: radial-gradient(#d1d5db 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* ──────────────────────────────────────────────────────────────── */
+
 .canvas-title-bar {
   position: absolute;
   top: 16px;

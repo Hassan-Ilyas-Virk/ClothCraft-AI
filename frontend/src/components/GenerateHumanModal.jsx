@@ -6,7 +6,7 @@ const GenerateHumanModal = ({ onClose, onApply }) => {
     const [prompt, setPrompt] = useState('');
     const [gender, setGender] = useState('any');
     const [negativePrompt, setNegativePrompt] = useState('');
-    const [steps, setSteps] = useState(50);
+    const [steps, setSteps] = useState(35);
     const [guidance, setGuidance] = useState(7.5);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -31,10 +31,8 @@ const GenerateHumanModal = ({ onClose, onApply }) => {
         setResultUrl(null);
 
         try {
-            // Incorporate gender into the prompt
             let finalPrompt = prompt;
             if (gender !== 'any') {
-                // If it starts with "a fashion model", replace it to inject the gender naturally
                 if (finalPrompt.toLowerCase().startsWith('a fashion model')) {
                     finalPrompt = finalPrompt.replace(/a fashion model/i, `a ${gender} fashion model`);
                 } else {
@@ -117,7 +115,7 @@ const GenerateHumanModal = ({ onClose, onApply }) => {
                         <textarea
                             value={prompt}
                             onChange={(e) => setPrompt(e.target.value)}
-                            placeholder={`e.g. A fashion model wearing a red evening gown, full body, standing pose, studio lighting`}
+                            placeholder={`e.g. A fashion model wearing a formal suit, full body, standing pose, studio lighting`}
                             disabled={isGenerating}
                             style={{
                                 width: '100%',

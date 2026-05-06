@@ -15,6 +15,7 @@ import MoodboardModal from './components/MoodboardModal';
 import StylebendModal from './components/StylebendModal';
 import GenerateHumanModal from './components/GenerateHumanModal';
 import BrushControls from './components/BrushControls';
+import LivePreviewPane from './components/LivePreviewPane';
 import ClothCraftLogo from './components/ClothCraftLogo';
 import { useLayerManager } from './hooks/useLayerManager';
 import {
@@ -74,6 +75,7 @@ function App() {
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState(null);
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
+    const [liveMode, setLiveMode] = useState(false);
 
     // Handle Spacebar Pan (Photoshop style)
     useEffect(() => {
@@ -288,6 +290,13 @@ function App() {
             canvasNameInputRef.current.select();
         }
     }, [nameEditing]);
+
+    // Refit canvas after the DOM reflows when live mode is toggled
+    useEffect(() => {
+        if (currentView !== 'canvas') return;
+        const tid = setTimeout(() => canvasRef.current?.fitToScreen(), 80);
+        return () => clearTimeout(tid);
+    }, [liveMode]);
     // ──────────────────────────────────────────────────────────────────
 
     // ── Auth handlers ─────────────────────────────────────────────────
@@ -909,6 +918,8 @@ function App() {
                         canUndo={historyState.canUndo}
                         canRedo={historyState.canRedo}
                         disabled={isProcessing || !activeLayerId}
+                        liveMode={liveMode}
+                        onLiveModeToggle={() => setLiveMode(m => !m)}
                     />
                 )}
             </div>
@@ -942,82 +953,92 @@ function App() {
                 )}
 
                 {/* Center Canvas */}
-                <div className="app-canvas-area">
-                    {layers.length > 0 && (
-                        <div className="canvas-title-bar glass-panel">
-                            {nameEditing ? (
-                                <div className="canvas-title-edit-wrap">
-                                    <input
-                                        ref={canvasNameInputRef}
-                                        className="canvas-title-input"
-                                        value={canvasName}
-                                        onChange={(e) => {
-                                            setCanvasName(e.target.value);
-                                            if (canvasNameError) setCanvasNameError('');
-                                        }}
-                                        onBlur={() => { void handleNameCommit(); }}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter') { e.preventDefault(); void handleNameCommit(); }
-                                            if (e.key === 'Escape') {
-                                                setNameEditing(false);
-                                                setCanvasNameError('');
-                                                setCanvasName(currentProject?.name || 'Untitled Design');
-                                            }
-                                        }}
-                                        maxLength={120}
-                                    />
-                                    {canvasNameError && <span className="canvas-title-error-tag">{canvasNameError}</span>}
-                                </div>
-                            ) : (
-                                <button
-                                    className="canvas-title-button"
-                                    onClick={() => { setCanvasNameError(''); setNameEditing(true); }}
-                                    title="Rename project"
-                                >
-                                    {canvasName || 'Untitled Design'}
-                                </button>
-                            )}
-                        </div>
-                    )}
+                <div className={`app-canvas-area${liveMode && layers.length > 0 ? ' live-mode' : ''}`}>
+                    <div className={liveMode && layers.length > 0 ? 'live-canvas-side' : ''}>
+                        {layers.length > 0 && (
+                            <div className="canvas-title-bar glass-panel">
+                                {nameEditing ? (
+                                    <div className="canvas-title-edit-wrap">
+                                        <input
+                                            ref={canvasNameInputRef}
+                                            className="canvas-title-input"
+                                            value={canvasName}
+                                            onChange={(e) => {
+                                                setCanvasName(e.target.value);
+                                                if (canvasNameError) setCanvasNameError('');
+                                            }}
+                                            onBlur={() => { void handleNameCommit(); }}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') { e.preventDefault(); void handleNameCommit(); }
+                                                if (e.key === 'Escape') {
+                                                    setNameEditing(false);
+                                                    setCanvasNameError('');
+                                                    setCanvasName(currentProject?.name || 'Untitled Design');
+                                                }
+                                            }}
+                                            maxLength={120}
+                                        />
+                                        {canvasNameError && <span className="canvas-title-error-tag">{canvasNameError}</span>}
+                                    </div>
+                                ) : (
+                                    <button
+                                        className="canvas-title-button"
+                                        onClick={() => { setCanvasNameError(''); setNameEditing(true); }}
+                                        title="Rename project"
+                                    >
+                                        {canvasName || 'Untitled Design'}
+                                    </button>
+                                )}
+                            </div>
+                        )}
 
-                    {layers.length > 0 ? (
-                        <MultiLayerCanvas
-                            ref={canvasRef}
-                            layers={layers}
-                            activeLayerId={activeLayerId}
-                            brushSize={activeTool === 'eraser' ? eraserSize : brushSize}
-                            brushColor={brushColor}
-                            activeTool={activeTool}
-                            onLayerUpdate={handleLayerUpdate}
-                            onCanvasSizeChange={setCurrentCanvasSize}
-                            onHistoryStateChange={setHistoryState}
-                        />
-                    ) : (
-                        <div className="empty-state">
-                            <input
-                                type="file"
-                                id="imageUpload"
-                                accept="image/*"
-                                onChange={handleImageUpload}
-                                style={{ display: 'none' }}
+                        {layers.length > 0 ? (
+                            <MultiLayerCanvas
+                                ref={canvasRef}
+                                layers={layers}
+                                activeLayerId={activeLayerId}
+                                brushSize={activeTool === 'eraser' ? eraserSize : brushSize}
+                                brushColor={brushColor}
+                                activeTool={activeTool}
+                                onLayerUpdate={handleLayerUpdate}
+                                onCanvasSizeChange={setCurrentCanvasSize}
+                                onHistoryStateChange={setHistoryState}
                             />
-                            <div className="empty-state-icon">
-                                <ImagePlus size={100} strokeWidth={1} color="rgba(255,255,255,0.1)" />
+                        ) : (
+                            <div className="empty-state">
+                                <input
+                                    type="file"
+                                    id="imageUpload"
+                                    accept="image/*"
+                                    onChange={handleImageUpload}
+                                    style={{ display: 'none' }}
+                                />
+                                <div className="empty-state-icon">
+                                    <ImagePlus size={100} strokeWidth={1} color="rgba(255,255,255,0.1)" />
+                                </div>
+                                <div className="empty-state-text">
+                                    Start your project with a human base
+                                </div>
+                                <div style={{ display: 'flex', gap: '20px', marginTop: '32px' }}>
+                                    <label htmlFor="imageUpload" className="empty-state-btn primary">
+                                        <Upload size={18} />
+                                        Upload Reference
+                                    </label>
+                                    <button className="empty-state-btn secondary" onClick={() => setShowGenerateHuman(true)}>
+                                        <Sparkles size={18} />
+                                        AI Generate
+                                    </button>
+                                </div>
                             </div>
-                            <div className="empty-state-text">
-                                Start your project with a human base
-                            </div>
-                            <div style={{ display: 'flex', gap: '20px', marginTop: '32px' }}>
-                                <label htmlFor="imageUpload" className="empty-state-btn primary">
-                                    <Upload size={18} />
-                                    Upload Reference
-                                </label>
-                                <button className="empty-state-btn secondary" onClick={() => setShowGenerateHuman(true)}>
-                                    <Sparkles size={18} />
-                                    AI Generate
-                                </button>
-                            </div>
-                        </div>
+                        )}
+                    </div>
+
+                    {liveMode && layers.length > 0 && (
+                        <LivePreviewPane
+                            layers={layers}
+                            canvasRef={canvasRef}
+                            canvasSize={currentCanvasSize}
+                        />
                     )}
                 </div>
 

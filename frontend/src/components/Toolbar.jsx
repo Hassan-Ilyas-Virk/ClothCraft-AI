@@ -12,7 +12,8 @@ import {
     ZoomIn,
     Palette,
     Undo2,
-    Redo2
+    Redo2,
+    Zap,
 } from 'lucide-react';
 import './Toolbar.css';
 
@@ -28,6 +29,8 @@ const Toolbar = ({
     canUndo,
     canRedo,
     disabled,
+    liveMode,
+    onLiveModeToggle,
 }) => {
     const tools = [
         { id: 'brush',        icon: Paintbrush,          label: 'Brush',     hint: 'Drag to paint' },
@@ -85,6 +88,18 @@ const Toolbar = ({
             >
                 <Redo2 size={20} strokeWidth={2} />
                 <span className="toolbar-tool-tooltip">Redo</span>
+            </button>
+
+            <div className="toolbar-divider" />
+
+            <button
+                className={`toolbar-tool live-toggle-btn${liveMode ? ' live-active' : ''}`}
+                onClick={onLiveModeToggle}
+                disabled={disabled}
+                title={liveMode ? 'Disable Live Preview' : 'Enable Live Pix2Pix Preview'}
+            >
+                <Zap size={20} strokeWidth={2} />
+                <span className="toolbar-tool-tooltip">{liveMode ? 'Live: ON' : 'Live Preview'}</span>
             </button>
 
             <div className="toolbar-color-section">

@@ -170,6 +170,18 @@
     z-index: 10;
 }
 
+.live-toggle-btn.live-active {
+  background: rgba(16, 185, 129, 0.15);
+  color: #059669;
+  box-shadow:
+    0 0 15px rgba(16, 185, 129, 0.25),
+    0 0 0 1px rgba(16, 185, 129, 0.4);
+}
+
+.live-toggle-btn.live-active:hover {
+  background: rgba(16, 185, 129, 0.22);
+}
+
 /* Active-tool hint bar \u2014 fixed at bottom-left of screen */
 .toolbar-hint-bar {
     position: fixed;
