@@ -391,7 +391,7 @@ const MultiLayerCanvas = forwardRef(({
                 const drawX = (SZ - drawW) / 2;
                 const drawY = (SZ - drawH) / 2;
                 tCtx.drawImage(img, drawX, drawY, drawW, drawH);
-                resolve(thumbnailCanvas.toDataURL('image/jpeg', 0.82));
+                resolve(thumbnailCanvas.toDataURL('image/png'));
             };
             img.src = data;
         });
@@ -1448,7 +1448,7 @@ const MultiLayerCanvas = forwardRef(({
                 const drawX = (SZ - drawW) / 2;
                 const drawY = (SZ - drawH) / 2;
                 tCtx.drawImage(img, drawX, drawY, drawW, drawH);
-                const thumbnail = thumbnailCanvas.toDataURL('image/jpeg', 0.82);
+                const thumbnail = thumbnailCanvas.toDataURL('image/png');
                 onLayerUpdate(layerId, { thumbnail, canvasData: data, bounds });
             };
             img.src = data;

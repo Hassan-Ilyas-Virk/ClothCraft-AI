@@ -49,7 +49,7 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename, onHover }) => {
           if (mx < 45 || mx > 215 || (mx - mn) / (mx || 1) < 0.18) continue;
           r += pr; g += pg; b += pb; n++;
         }
-        if (n >= 3) setGlowColor(`rgba(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)},0.85)`);
+        if (n >= 3) setGlowColor(`rgba(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)},1)`);
       } catch { }
     };
     img.src = thumbSrc;
@@ -94,11 +94,6 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename, onHover }) => {
           ) : (
             <div className="hp-card-thumb-empty"><ImageIcon size={36} strokeWidth={1} /></div>
           )}
-          <div className="hp-card-overlay">
-            <button className="hp-card-open-btn" onClick={e => { e.stopPropagation(); onOpen(project); }}>
-              <FolderOpen size={16} /> Open
-            </button>
-          </div>
         </div>
 
         <div className="hp-card-footer">
@@ -165,7 +160,6 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [showProfile, setShowProfile] = useState(false);
   const [localUser, setLocalUser] = useState(user);
-  const [bgAccent, setBgAccent] = useState(null);
 
   const greeting = () => {
     const h = new Date().getHours();
@@ -184,15 +178,6 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
 
   return (
     <div className="hp-root">
-      {/* ── Page background accent (dominant color of hovered card) ── */}
-      <div
-        className="hp-bg-accent"
-        style={{
-          backgroundColor: bgAccent || 'transparent',
-          opacity: bgAccent ? 0.20 : 0,
-        }}
-      />
-
       {/* ── Header ── */}
       <header className="hp-header">
         <div className="hp-header-brand">
@@ -246,7 +231,6 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
                 onOpen={onOpenProject}
                 onDelete={(id) => setConfirmDelete(id)}
                 onRename={onRenameProject}
-                onHover={setBgAccent}
               />
             ))}
           </div>

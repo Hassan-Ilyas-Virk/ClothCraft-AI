@@ -59,6 +59,76 @@ function loadImage(src) {
   });
 }
 
+/**
+ * Composite translated Pix2Pix result onto the output canvas using the same
+ * pixel-level logic as the Clothify pipeline (compositeTranslatedDoodleOnReference).
+ * Handles dark doodle colors correctly by checking the original doodle brightness.
+ */
+function compositeTranslatedLayer(ctx, translatedImg, doodleImg, width, height, opacity) {
+  // Draw doodle onto a temp canvas to read its pixels
+  const doodleCv = document.createElement('canvas');
+  doodleCv.width = width; doodleCv.height = height;
+  const doodleCtx = doodleCv.getContext('2d');
+  doodleCtx.drawImage(doodleImg, 0, 0, width, height);
+  const doodleData = doodleCtx.getImageData(0, 0, width, height);
+
+  // Draw translated result onto a temp canvas to read its pixels
+  const transCv = document.createElement('canvas');
+  transCv.width = width; transCv.height = height;
+  const transCtx = transCv.getContext('2d');
+  transCtx.drawImage(translatedImg, 0, 0, width, height);
+  const transData = transCtx.getImageData(0, 0, width, height);
+
+  // Read current composite (reference already drawn)
+  const compositeData = ctx.getImageData(0, 0, width, height);
+
+  const BLACK_THRESHOLD = 50;
+  const DARK_THRESHOLD = 40;
+  const EDGE_ALPHA_MIN = 30;
+  const EDGE_ALPHA_SOFT = 200;
+
+  for (let i = 0; i < doodleData.data.length; i += 4) {
+    const originalAlpha = doodleData.data[i + 3];
+
+    if (originalAlpha > EDGE_ALPHA_MIN) {
+      // Check if original doodle was dark
+      const origR = doodleData.data[i];
+      const origG = doodleData.data[i + 1];
+      const origB = doodleData.data[i + 2];
+      const originalBrightness = origR * 0.299 + origG * 0.587 + origB * 0.114;
+      const originalWasDark = originalBrightness < 100;
+
+      const transR = transData.data[i];
+      const transG = transData.data[i + 1];
+      const transB = transData.data[i + 2];
+      const translatedIsBlack = transR < BLACK_THRESHOLD && transG < BLACK_THRESHOLD && transB < BLACK_THRESHOLD;
+      const brightness = transR * 0.299 + transG * 0.587 + transB * 0.114;
+      const translatedIsDark = brightness < DARK_THRESHOLD;
+
+      if ((translatedIsBlack || translatedIsDark) && !originalWasDark) {
+        // Dark Pix2Pix background artifact on a light doodle — skip, keep reference
+        continue;
+      }
+
+      // Edge feathering
+      const blendFactor = originalAlpha >= EDGE_ALPHA_SOFT
+        ? opacity
+        : ((originalAlpha - EDGE_ALPHA_MIN) / (EDGE_ALPHA_SOFT - EDGE_ALPHA_MIN)) * opacity;
+
+      const refR = compositeData.data[i];
+      const refG = compositeData.data[i + 1];
+      const refB = compositeData.data[i + 2];
+
+      compositeData.data[i]     = Math.round(refR * (1 - blendFactor) + transR * blendFactor);
+      compositeData.data[i + 1] = Math.round(refG * (1 - blendFactor) + transG * blendFactor);
+      compositeData.data[i + 2] = Math.round(refB * (1 - blendFactor) + transB * blendFactor);
+      compositeData.data[i + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(compositeData, 0, 0);
+}
+
 const LivePreviewPane = ({ layers, canvasRef, canvasSize }) => {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -85,11 +155,22 @@ const LivePreviewPane = ({ layers, canvasRef, canvasSize }) => {
 
         // Draw reference layer as background
         const refLayer = layers.find(l => l.type === 'reference' && l.visible);
-        if (refLayer?.canvasData) {
-          const refImg = await loadImage(refLayer.canvasData);
-          ctx.globalAlpha = refLayer.opacity ?? 1;
-          ctx.drawImage(refImg, 0, 0, width, height);
-          ctx.globalAlpha = 1;
+        if (refLayer) {
+          const refBlob = await canvasRef.current.getLayerBlob(refLayer.id);
+          if (refBlob) {
+            const refUrl = URL.createObjectURL(refBlob);
+            try {
+              const refImg = await loadImage(refUrl);
+              ctx.globalAlpha = refLayer.opacity ?? 1;
+              ctx.drawImage(refImg, 0, 0, width, height);
+              ctx.globalAlpha = 1;
+            } finally {
+              URL.revokeObjectURL(refUrl);
+            }
+          } else {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, width, height);
+          }
         } else {
           ctx.fillStyle = '#ffffff';
           ctx.fillRect(0, 0, width, height);
@@ -108,25 +189,30 @@ const LivePreviewPane = ({ layers, canvasRef, canvasSize }) => {
         if (gen !== genRef.current) return;
 
         // Translate all layers in parallel (Pix2Pix calls are independent)
+        // Pass the original blob through so we can use it as a mask
         const translations = await Promise.allSettled(
           layerBlobs.map(({ layer, blob }) =>
-            blob ? sendToPix2Pix(blob).then(url => ({ layer, url })) : Promise.resolve(null)
+            blob ? sendToPix2Pix(blob).then(url => ({ layer, url, blob })) : Promise.resolve(null)
           )
         );
 
         if (gen !== genRef.current) return;
 
-        // Composite results in layer order
+        // Composite results in layer order, masked by original doodle alpha
         let processed = 0;
         for (const result of translations) {
           if (result.status === 'fulfilled' && result.value) {
-            const { layer, url } = result.value;
-            const img = await loadImage(url);
-            ctx.globalAlpha = layer.opacity ?? 1;
-            ctx.globalCompositeOperation = layer.blendMode || 'source-over';
-            ctx.drawImage(img, 0, 0, width, height);
-            ctx.globalAlpha = 1;
-            ctx.globalCompositeOperation = 'source-over';
+            const { layer, url, blob } = result.value;
+            const translatedImg = await loadImage(url);
+
+            // Load the original doodle as an image to use as alpha mask
+            const doodleUrl = URL.createObjectURL(blob);
+            try {
+              const doodleImg = await loadImage(doodleUrl);
+              compositeTranslatedLayer(ctx, translatedImg, doodleImg, width, height, layer.opacity ?? 1);
+            } finally {
+              URL.revokeObjectURL(doodleUrl);
+            }
             processed++;
           }
         }

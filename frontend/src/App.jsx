@@ -519,7 +519,16 @@ function App() {
         setUserProjects(projects);
     };
     const handleBackToHome = async () => {
-        await _saveProject();
+        const hasContent = layers.some(l => l.type === 'reference' || (l.type === 'drawing' && l.canvasData));
+        if (!hasContent && currentProject) {
+            try {
+                await projectService.deleteProject(currentProject.id);
+            } catch (e) {
+                console.error('Failed to delete empty project', e);
+            }
+        } else {
+            await _saveProject();
+        }
         setCurrentView('home');
     };
 
