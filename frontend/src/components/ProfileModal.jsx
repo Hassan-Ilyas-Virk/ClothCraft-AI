@@ -20,22 +20,25 @@ async function resizeImageToDataUrl(file, maxPx = 240) {
 }
 
 const ProfileModal = ({ user, onClose, onUserUpdate }) => {
+  const [tab, setTab] = useState('profile'); // 'profile' | 'password'
+
+  // Profile tab state
   const [avatarPreview, setAvatarPreview] = useState(user?.avatarUrl || null);
-  const [avatarFile, setAvatarFile]       = useState(null);
+  const [avatarData, setAvatarData]       = useState(null);
   const [displayName, setDisplayName]     = useState(user?.displayName || '');
   const [profileSaving, setProfileSaving] = useState(false);
-  const [profileMsg, setProfileMsg]       = useState(null); // {type:'ok'|'err', text}
+  const [profileMsg, setProfileMsg]       = useState(null);
+  const avatarInputRef                    = useRef(null);
 
-  const [currentPw, setCurrentPw]   = useState('');
-  const [newPw, setNewPw]           = useState('');
-  const [confirmPw, setConfirmPw]   = useState('');
-  const [showCur, setShowCur]       = useState(false);
-  const [showNew, setShowNew]       = useState(false);
-  const [showConf, setShowConf]     = useState(false);
-  const [pwSaving, setPwSaving]     = useState(false);
-  const [pwMsg, setPwMsg]           = useState(null);
-
-  const avatarInputRef = useRef(null);
+  // Password tab state
+  const [currentPw, setCurrentPw] = useState('');
+  const [newPw, setNewPw]         = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [showCur, setShowCur]     = useState(false);
+  const [showNew, setShowNew]     = useState(false);
+  const [showConf, setShowConf]   = useState(false);
+  const [pwSaving, setPwSaving]   = useState(false);
+  const [pwMsg, setPwMsg]         = useState(null);
 
   const initials = (name) =>
     (name || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
@@ -45,7 +48,7 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
     if (!file) return;
     const dataUrl = await resizeImageToDataUrl(file);
     setAvatarPreview(dataUrl);
-    setAvatarFile(dataUrl);
+    setAvatarData(dataUrl);
   };
 
   const handleSaveProfile = async () => {
@@ -55,16 +58,16 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
       const updates = {};
       if (displayName.trim() && displayName.trim() !== user?.displayName)
         updates.displayName = displayName.trim();
-      if (avatarFile)
-        updates.avatarUrl = avatarFile;
+      if (avatarData)
+        updates.avatarUrl = avatarData;
       if (!Object.keys(updates).length) {
         setProfileMsg({ type: 'ok', text: 'Nothing to update.' });
         return;
       }
       const updated = await updateProfile(updates);
       onUserUpdate(updated);
-      setAvatarFile(null);
-      setProfileMsg({ type: 'ok', text: 'Profile saved.' });
+      setAvatarData(null);
+      setProfileMsg({ type: 'ok', text: 'Profile saved successfully.' });
     } catch (err) {
       setProfileMsg({ type: 'err', text: err.message || 'Failed to save.' });
     } finally {
@@ -80,7 +83,7 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
     setPwMsg(null);
     try {
       await changePassword({ currentPassword: currentPw, newPassword: newPw });
-      setPwMsg({ type: 'ok', text: 'Password updated.' });
+      setPwMsg({ type: 'ok', text: 'Password updated successfully.' });
       setCurrentPw(''); setNewPw(''); setConfirmPw('');
     } catch (err) {
       setPwMsg({ type: 'err', text: err.message || 'Failed to change password.' });
@@ -91,108 +94,133 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
 
   return (
     <div className="pm-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="pm-panel">
+      <div className="pm-modal">
         {/* Header */}
         <div className="pm-header">
-          <h2 className="pm-title">Profile Settings</h2>
+          <h2 className="pm-title">Account Settings</h2>
           <button className="pm-close" onClick={onClose}><X size={18} /></button>
         </div>
 
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid #f0ebff', flexShrink: 0 }}>
+          {[['profile', <User size={14} />, 'Profile'], ['password', <Lock size={14} />, 'Password']].map(([key, icon, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              style={{
+                flex: 1, padding: '11px 0', border: 'none', background: 'none',
+                fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                color: tab === key ? '#7c3aed' : '#9ca3af',
+                borderBottom: `2px solid ${tab === key ? '#8b5cf6' : 'transparent'}`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                transition: 'color 0.15s',
+              }}
+            >
+              {icon}{label}
+            </button>
+          ))}
+        </div>
+
+        {/* Body */}
         <div className="pm-body">
-          {/* Avatar */}
-          <div className="pm-avatar-row">
-            <button className="pm-avatar-wrap" onClick={() => avatarInputRef.current?.click()} title="Change photo">
-              {avatarPreview ? (
-                <img src={avatarPreview} alt="avatar" className="pm-avatar-img" />
-              ) : (
-                <div className="pm-avatar-placeholder">{initials(displayName || user?.displayName)}</div>
+
+          {/* ── Profile tab ── */}
+          {tab === 'profile' && (
+            <>
+              {/* Avatar */}
+              <div className="pm-avatar-row">
+                <button className="pm-avatar-wrap" onClick={() => avatarInputRef.current?.click()} title="Change photo">
+                  {avatarPreview ? (
+                    <img src={avatarPreview} alt="avatar" className="pm-avatar-img" />
+                  ) : (
+                    <div className="pm-avatar-placeholder">{initials(displayName || user?.displayName)}</div>
+                  )}
+                  <div className="pm-avatar-overlay"><Camera size={18} /></div>
+                </button>
+                <input type="file" accept="image/*" ref={avatarInputRef} style={{ display: 'none' }} onChange={handleAvatarPick} />
+                <div className="pm-avatar-info">
+                  <p className="pm-avatar-name">{user?.displayName}</p>
+                  <p className="pm-avatar-email">{user?.email}</p>
+                  <p className="pm-avatar-hint">Click photo to upload · auto-compressed</p>
+                </div>
+              </div>
+
+              <div className="pm-divider" />
+
+              <div className="pm-section">
+                <div className="pm-section-title"><User size={14} /> Display Name</div>
+                <input
+                  className="pm-input"
+                  value={displayName}
+                  onChange={e => setDisplayName(e.target.value)}
+                  placeholder="Your name"
+                  maxLength={120}
+                />
+              </div>
+
+              {profileMsg && (
+                <div className={`pm-msg ${profileMsg.type === 'ok' ? 'pm-msg--ok' : 'pm-msg--err'}`}>
+                  {profileMsg.type === 'ok' ? <Check size={13} /> : <AlertCircle size={13} />}
+                  {profileMsg.text}
+                </div>
               )}
-              <div className="pm-avatar-overlay"><Camera size={18} /></div>
-            </button>
-            <input type="file" accept="image/*" ref={avatarInputRef} style={{ display: 'none' }} onChange={handleAvatarPick} />
-            <div className="pm-avatar-info">
-              <p className="pm-avatar-name">{user?.displayName}</p>
-              <p className="pm-avatar-email">{user?.email}</p>
-              <p className="pm-avatar-hint">Click photo to change · Max 180 KB after compression</p>
-            </div>
-          </div>
+            </>
+          )}
 
-          <div className="pm-divider" />
+          {/* ── Password tab ── */}
+          {tab === 'password' && (
+            <div className="pm-section">
+              <div className="pm-section-title"><Lock size={14} /> Change Password</div>
 
-          {/* Display name */}
-          <section className="pm-section">
-            <div className="pm-section-title"><User size={15} /> Account Info</div>
-            <label className="pm-label">Display Name</label>
-            <input
-              className="pm-input"
-              value={displayName}
-              onChange={e => setDisplayName(e.target.value)}
-              placeholder="Your name"
-              maxLength={120}
-            />
-            {profileMsg && (
-              <div className={`pm-msg ${profileMsg.type === 'ok' ? 'pm-msg--ok' : 'pm-msg--err'}`}>
-                {profileMsg.type === 'ok' ? <Check size={13} /> : <AlertCircle size={13} />}
-                {profileMsg.text}
+              <div className="pm-field">
+                <label className="pm-label">Current Password</label>
+                <div className="pm-pw-wrap">
+                  <input className="pm-input" type={showCur ? 'text' : 'password'} value={currentPw}
+                    onChange={e => setCurrentPw(e.target.value)} placeholder="Current password" />
+                  <button className="pm-pw-eye" onClick={() => setShowCur(v => !v)}>{showCur ? <EyeOff size={15} /> : <Eye size={15} />}</button>
+                </div>
               </div>
-            )}
+
+              <div className="pm-field">
+                <label className="pm-label">New Password</label>
+                <div className="pm-pw-wrap">
+                  <input className="pm-input" type={showNew ? 'text' : 'password'} value={newPw}
+                    onChange={e => setNewPw(e.target.value)} placeholder="Min 8 characters" />
+                  <button className="pm-pw-eye" onClick={() => setShowNew(v => !v)}>{showNew ? <EyeOff size={15} /> : <Eye size={15} />}</button>
+                </div>
+              </div>
+
+              <div className="pm-field">
+                <label className="pm-label">Confirm New Password</label>
+                <div className="pm-pw-wrap">
+                  <input className="pm-input" type={showConf ? 'text' : 'password'} value={confirmPw}
+                    onChange={e => setConfirmPw(e.target.value)} placeholder="Repeat new password" />
+                  <button className="pm-pw-eye" onClick={() => setShowConf(v => !v)}>{showConf ? <EyeOff size={15} /> : <Eye size={15} />}</button>
+                </div>
+              </div>
+
+              {pwMsg && (
+                <div className={`pm-msg ${pwMsg.type === 'ok' ? 'pm-msg--ok' : 'pm-msg--err'}`}>
+                  {pwMsg.type === 'ok' ? <Check size={13} /> : <AlertCircle size={13} />}
+                  {pwMsg.text}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="pm-footer">
+          <button className="pm-cancel-btn" onClick={onClose}>Cancel</button>
+          {tab === 'profile' ? (
             <button className="pm-save-btn" onClick={handleSaveProfile} disabled={profileSaving}>
-              {profileSaving ? 'Saving…' : 'Save Changes'}
+              {profileSaving ? 'Saving…' : 'Save Profile'}
             </button>
-          </section>
-
-          <div className="pm-divider" />
-
-          {/* Password */}
-          <section className="pm-section">
-            <div className="pm-section-title"><Lock size={15} /> Change Password</div>
-
-            <label className="pm-label">Current Password</label>
-            <div className="pm-pw-wrap">
-              <input
-                className="pm-input"
-                type={showCur ? 'text' : 'password'}
-                value={currentPw}
-                onChange={e => setCurrentPw(e.target.value)}
-                placeholder="Current password"
-              />
-              <button className="pm-pw-eye" onClick={() => setShowCur(v => !v)}>{showCur ? <EyeOff size={15} /> : <Eye size={15} />}</button>
-            </div>
-
-            <label className="pm-label">New Password</label>
-            <div className="pm-pw-wrap">
-              <input
-                className="pm-input"
-                type={showNew ? 'text' : 'password'}
-                value={newPw}
-                onChange={e => setNewPw(e.target.value)}
-                placeholder="Min 8 characters"
-              />
-              <button className="pm-pw-eye" onClick={() => setShowNew(v => !v)}>{showNew ? <EyeOff size={15} /> : <Eye size={15} />}</button>
-            </div>
-
-            <label className="pm-label">Confirm New Password</label>
-            <div className="pm-pw-wrap">
-              <input
-                className="pm-input"
-                type={showConf ? 'text' : 'password'}
-                value={confirmPw}
-                onChange={e => setConfirmPw(e.target.value)}
-                placeholder="Repeat new password"
-              />
-              <button className="pm-pw-eye" onClick={() => setShowConf(v => !v)}>{showConf ? <EyeOff size={15} /> : <Eye size={15} />}</button>
-            </div>
-
-            {pwMsg && (
-              <div className={`pm-msg ${pwMsg.type === 'ok' ? 'pm-msg--ok' : 'pm-msg--err'}`}>
-                {pwMsg.type === 'ok' ? <Check size={13} /> : <AlertCircle size={13} />}
-                {pwMsg.text}
-              </div>
-            )}
+          ) : (
             <button className="pm-save-btn" onClick={handleChangePassword} disabled={pwSaving}>
               {pwSaving ? 'Updating…' : 'Update Password'}
             </button>
-          </section>
+          )}
         </div>
       </div>
     </div>
