@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import API_BASE from '../config.js';
 import './PatternMakerModal.css';
 
 const PatternMakerModal = ({
@@ -224,7 +225,7 @@ const PatternMakerModal = ({
             formData.append('prompt', elementPrompt);
             formData.append('strength', strength.toString());
 
-            const response = await fetch('http://127.0.0.1:5001/inpaint', {
+            const response = await fetch('${API_BASE}/inpaint', {
                 method: 'POST',
                 body: formData
             });

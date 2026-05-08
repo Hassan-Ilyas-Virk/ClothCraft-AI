@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, SlidersHorizontal, ImagePlus, Sparkles, Wand2 } from 'lucide-react';
 import { blendStyles } from '../utils/imageProcessing';
+import API_BASE from '../config.js';
 import './ProgressBar.css';
 
 const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
@@ -122,7 +123,7 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
             formData.append('image', blob, 'stylebend_result.png');
             formData.append('strength', '0.35');
 
-            const refineRes = await fetch('http://127.0.0.1:5001/refine-stylebend', {
+            const refineRes = await fetch('${API_BASE}/refine-stylebend', {
                 method: 'POST',
                 body: formData,
             });

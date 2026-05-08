@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import API_BASE from '../config.js';
 import './LivePreviewPane.css';
 
 async function sendToPix2Pix(blob) {
@@ -7,7 +8,7 @@ async function sendToPix2Pix(blob) {
   // rgba=true → backend returns RGBA PNG with real rembg transparency.
   // No brightness-threshold stripping needed, so dark colours have no holes
   // and light colours have no black fringe.
-  const res = await fetch('http://127.0.0.1:5001/translate-doodle?rgba=true', {
+  const res = await fetch('${API_BASE}/translate-doodle?rgba=true', {
     method: 'POST',
     body: formData,
   });
