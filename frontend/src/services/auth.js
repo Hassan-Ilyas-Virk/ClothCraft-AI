@@ -1,40 +1,38 @@
-import { apiRequest } from './api';
+import { apiRequest, tokenStore } from './api';
 
-/**
- * Register a new account and start an authenticated session.
- */
 export async function signup(email, password, displayName) {
-  return apiRequest('/auth/signup', {
+  const data = await apiRequest('/auth/signup', {
     method: 'POST',
     body: JSON.stringify({ email, password, displayName }),
   });
+  if (data?.token) tokenStore.set(data.token);
+  return data?.user ?? data;
 }
 
-/**
- * Sign in with email + password.
- */
 export async function login(email, password) {
-  return apiRequest('/auth/login', {
+  const data = await apiRequest('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
+  if (data?.token) tokenStore.set(data.token);
+  return data?.user ?? data;
 }
 
-/** Remove the current session. */
 export async function logout() {
-  await apiRequest('/auth/logout', { method: 'POST' });
+  tokenStore.clear();
+  await apiRequest('/auth/logout', { method: 'POST' }).catch(() => {});
 }
 
-/** Returns current authenticated user or null if not signed in. */
 export async function getUser() {
+  if (!tokenStore.get()) return null;
   try {
     return await apiRequest('/auth/me');
   } catch {
+    tokenStore.clear();
     return null;
   }
 }
 
-/** @returns {boolean} */
 export async function isAuthenticated() {
   const user = await getUser();
   return !!user;

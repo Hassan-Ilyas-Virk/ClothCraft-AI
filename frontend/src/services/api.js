@@ -1,5 +1,13 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:5001';
 
+const TOKEN_KEY = 'cc_auth_token';
+
+export const tokenStore = {
+  get: () => localStorage.getItem(TOKEN_KEY),
+  set: (t) => localStorage.setItem(TOKEN_KEY, t),
+  clear: () => localStorage.removeItem(TOKEN_KEY),
+};
+
 async function parseJsonResponse(response) {
   const text = await response.text();
   if (!text) return null;
@@ -11,11 +19,12 @@ async function parseJsonResponse(response) {
 }
 
 export async function apiRequest(path, options = {}) {
+  const token = tokenStore.get();
   const response = await fetch(`${API_BASE_URL}${path}`, {
-    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       'ngrok-skip-browser-warning': '1',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {}),
     },
     ...options,

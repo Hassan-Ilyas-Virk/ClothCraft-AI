@@ -261,10 +261,10 @@ print(f"Using device: {device}")
 app = FastAPI(title="ClothCraft AI", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=MONGODB_CORS_ORIGINS,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
 )
 
 
@@ -273,7 +273,10 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
 
-    token = request.cookies.get(AUTH_COOKIE_NAME)
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else None
+    if not token:
+        token = request.cookies.get(AUTH_COOKIE_NAME)
     if not token:
         raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -1431,7 +1434,7 @@ async def signup(payload: SignupRequest):
     created_user = await mongo.db["users"].find_one({"_id": result.inserted_id})
 
     token = create_access_token(str(result.inserted_id))
-    response = JSONResponse(serialize_user(created_user))
+    response = JSONResponse({"user": serialize_user(created_user), "token": token})
     set_auth_cookie(response, token)
     return response
 
@@ -1460,7 +1463,7 @@ async def login(payload: LoginRequest):
         )
 
     token = create_access_token(str(user_doc["_id"]))
-    response = JSONResponse(serialize_user(user_doc))
+    response = JSONResponse({"user": serialize_user(user_doc), "token": token})
     set_auth_cookie(response, token)
     return response
 
