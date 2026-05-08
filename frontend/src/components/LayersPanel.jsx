@@ -18,7 +18,8 @@ const LayersPanel = ({
     onUpdateLayer,
     onStylebend,
     onStylebendFromLayer,
-    onGenerateHuman
+    onGenerateHuman,
+    onTextToClothes,
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
     const [draggedLayerId, setDraggedLayerId] = useState(null);
@@ -232,6 +233,7 @@ const LayersPanel = ({
                                     onClothify={onClothify}
                                     onPatternMaker={onPatternMaker}
                                     onStylebend={onStylebendFromLayer}
+                                    onTextToClothes={onTextToClothes}
                                 />
                             </div>
                         )}

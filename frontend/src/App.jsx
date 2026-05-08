@@ -16,6 +16,7 @@ import StylebendModal from './components/StylebendModal';
 import GenerateHumanModal from './components/GenerateHumanModal';
 import BrushControls from './components/BrushControls';
 import LivePreviewPane from './components/LivePreviewPane';
+import TextToClothesModal from './components/TextToClothesModal';
 import ClothCraftLogo from './components/ClothCraftLogo';
 import { useLayerManager } from './hooks/useLayerManager';
 import {
@@ -76,6 +77,7 @@ function App() {
     const [error, setError] = useState(null);
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
     const [liveMode, setLiveMode] = useState(false);
+    const [showTextToClothes, setShowTextToClothes] = useState(false);
 
     // Handle Spacebar Pan (Photoshop style)
     useEffect(() => {
@@ -880,6 +882,29 @@ function App() {
         setShowStylebend(true);
     };
 
+    const handleApplyTextToClothes = async (resultUrl) => {
+        try {
+            const res = await fetch(resultUrl);
+            const blob = await res.blob();
+            const referenceLayer = getReferenceLayer();
+            if (!referenceLayer) return;
+            setTimeout(async () => {
+                if (canvasRef.current) {
+                    await canvasRef.current.loadImageToLayer(referenceLayer.id, blob, false);
+                    const freshUrl = URL.createObjectURL(blob);
+                    updateLayer(referenceLayer.id, {
+                        canvasData: freshUrl,
+                        thumbnail: freshUrl,
+                        transform: { x: 0, y: 0, scale: 1 },
+                    });
+                }
+            }, 50);
+        } catch (err) {
+            console.error('Error applying Text-to-Clothes result:', err);
+            setError('Failed to apply Text-to-Clothes result');
+        }
+    };
+
     // ── Conditional routing renders ────────────────────────────────────
     if (currentView === 'loading') return null;
     if (currentView === 'login') return (
@@ -1063,6 +1088,7 @@ function App() {
                         }}
                         onStylebendFromLayer={handleStylebendFromLayer}
                         onGenerateHuman={() => setShowGenerateHuman(true)}
+                        onTextToClothes={() => setShowTextToClothes(true)}
                     />
                 )}
             </div >
@@ -1120,6 +1146,17 @@ function App() {
                     <GenerateHumanModal
                         onClose={() => setShowGenerateHuman(false)}
                         onApply={handleApplyGenerateHuman}
+                    />
+                )
+            }
+
+            {/* Text to Clothes Modal */}
+            {
+                showTextToClothes && (
+                    <TextToClothesModal
+                        referenceLayer={getReferenceLayer()}
+                        onClose={() => setShowTextToClothes(false)}
+                        onApply={handleApplyTextToClothes}
                     />
                 )
             }

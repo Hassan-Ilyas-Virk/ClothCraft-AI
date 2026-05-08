@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette } from 'lucide-react';
+import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette, Wand2 } from 'lucide-react';
 import './LayersPanel.css';
 
 const LayerItem = ({
@@ -18,7 +18,8 @@ const LayerItem = ({
     onDelete,
     onClothify,
     onPatternMaker,
-    onStylebend
+    onStylebend,
+    onTextToClothes,
 }) => {
     const [showContextMenu, setShowContextMenu] = useState(false);
     const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
@@ -218,6 +219,13 @@ const LayerItem = ({
                 >
                     {layer.type === 'reference' ? (
                         <>
+                            <div className="layer-context-menu-item clothify" onClick={() => {
+                                setShowContextMenu(false);
+                                onTextToClothes && onTextToClothes(layer);
+                            }}>
+                                <Wand2 size={16} /> Text to Clothes
+                            </div>
+                            <div className="layer-context-menu-divider" />
                             <div className="layer-context-menu-item clothify" onClick={() => {
                                 setShowContextMenu(false);
                                 onStylebend && onStylebend(layer);

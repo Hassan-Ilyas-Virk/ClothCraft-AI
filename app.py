@@ -783,6 +783,87 @@ async def refine_stylebend_endpoint(
 latent_cache = {}
 import hashlib
 
+# Route for Text-to-Clothes generation
+@app.post('/text-to-clothes')
+async def text_to_clothes_endpoint(
+    reference: UploadFile = File(...),
+    prompt: str = Form(...),
+    strength: str = Form('0.55'),
+):
+    """Regenerates clothing on a human model from a text description.
+
+    Strategy: img2img with a clothing-focused prompt and moderate strength so the
+    face, pose and background are preserved while only the garment changes.
+    """
+    if sd_pipe is None:
+        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
+
+    start = time.perf_counter()
+    print(f"👗 Text-to-Clothes: '{prompt}'")
+
+    try:
+        reference_bytes = await reference.read()
+        strength_val = max(0.3, min(0.85, float(strength)))
+
+        # Load reference and composite onto white (handles RGBA reference layers)
+        original_rgba = Image.open(io.BytesIO(reference_bytes)).convert('RGBA')
+        reference_rgb = Image.new("RGB", original_rgba.size, (255, 255, 255))
+        reference_rgb.paste(original_rgba, mask=original_rgba.split()[3])
+        original_size = reference_rgb.size
+
+        reference_rgb = reference_rgb.resize((512, 512), Image.LANCZOS)
+
+        # Clothing-focused prompt: guide model toward the garment while keeping everything else
+        enhanced_prompt = (
+            f"fashion photo, person wearing {prompt}, "
+            "high quality, detailed, photorealistic, studio lighting, "
+            "professional fashion photography, full body shot, sharp focus"
+        )
+
+        # Protect face, background and overall composition
+        negative_prompt = (
+            "face changes, different face, new face, distorted face, blurry face, "
+            "deformed face, bad anatomy, low quality, blurry, distorted, "
+            "different person, background changes, watermark, text, logo"
+        )
+
+        print(f"📝 Prompt: {enhanced_prompt}")
+        print(f"🎚️ Strength: {strength_val}")
+
+        result = sd_pipe(
+            prompt=enhanced_prompt,
+            negative_prompt=negative_prompt,
+            image=reference_rgb,
+            strength=strength_val,
+            num_inference_steps=40,
+            guidance_scale=7.5,
+        ).images[0]
+
+        # Restore original dimensions and alpha channel
+        result = result.resize(original_size, Image.LANCZOS).convert('RGBA')
+        result.putalpha(original_rgba.split()[3])
+
+        byte_io = io.BytesIO()
+        result.save(byte_io, 'PNG')
+        byte_io.seek(0)
+
+        await log_generation_event(
+            endpoint="text-to-clothes",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+        )
+        return StreamingResponse(byte_io, media_type='image/png')
+
+    except Exception as e:
+        print(f"Error in text-to-clothes: {e}")
+        await log_generation_event(
+            endpoint="text-to-clothes",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Route for Style Bending
 @app.post('/blend-styles')
 async def blend_styles(
