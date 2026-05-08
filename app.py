@@ -787,17 +787,17 @@ def _build_clothing_mask(reference_rgb: Image.Image) -> Image.Image:
     """Returns a grayscale mask (L mode) covering the clothing region of a person.
 
     Strategy:
-      1. Try rembg to get the person silhouette, then zero-out the face band
-         (top 20 % of the person's bounding-box height).
+      1. Try rembg to get the person silhouette, then zero-out the face+neck
+         band (top 38 % of the person's bounding-box height).
       2. If rembg is unavailable / fails, fall back to a geometric centre-body
-         rectangle that skips the top 22 % of the image (head) and the bottom
-         5 % (feet / floor), clipped horizontally to the inner 80 %.
+         rectangle that skips the top 38 % of the image and the bottom 5 %.
 
-    The result is always feathered with a 6 px Gaussian blur so the SD composite
-    blends softly at the boundary.
+    Applies Gaussian blur for soft compositing edges, then hard-zeros everything
+    above the cutoff row so blur doesn't bleed back into the face area.
     """
     w, h = reference_rgb.size
     mask_np = None
+    cutoff_row = 0   # first row of the clothing region
 
     # ── Attempt 1: rembg person silhouette ──────────────────────────────────
     try:
@@ -809,35 +809,33 @@ def _build_clothing_mask(reference_rgb: Image.Image) -> Image.Image:
         alpha_arr = np.array(person_rgba.split()[3])           # 0-255
 
         rows = np.any(alpha_arr > 10, axis=1)
-        cols = np.any(alpha_arr > 10, axis=0)
-        if rows.any() and cols.any():
+        if rows.any():
             rmin = int(np.where(rows)[0][0])
             rmax = int(np.where(rows)[0][-1])
             person_height = rmax - rmin
 
             # Face band = top 20 % of person height
-            face_bottom = rmin + int(person_height * 0.20)
-
+            cutoff_row = rmin + int(person_height * 0.20)
             silhouette = (alpha_arr > 10).astype(np.uint8) * 255
-            silhouette[:face_bottom, :] = 0   # zero out head / face row
+            silhouette[:cutoff_row, :] = 0
             mask_np = silhouette
-            print("   ✅ Clothing mask built from rembg silhouette")
+            print(f"   ✅ Clothing mask: rembg silhouette, cutoff row {cutoff_row}")
     except Exception as e:
-        print(f"   ⚠️ rembg unavailable for clothing mask ({e}), using geometric fallback")
+        print(f"   ⚠️ rembg unavailable ({e}), using geometric fallback")
 
     # ── Attempt 2: geometric body rectangle ─────────────────────────────────
     if mask_np is None:
-        top    = int(h * 0.22)   # skip head
-        bottom = int(h * 0.95)   # skip feet
-        left   = int(w * 0.10)
-        right  = int(w * 0.90)
+        cutoff_row = int(h * 0.22)
         mask_np = np.zeros((h, w), dtype=np.uint8)
-        mask_np[top:bottom, left:right] = 255
-        print("   📐 Clothing mask built from geometric fallback")
+        mask_np[cutoff_row:int(h * 0.95), int(w * 0.10):int(w * 0.90)] = 255
+        print(f"   📐 Clothing mask: geometric fallback, cutoff row {cutoff_row}")
 
+    # Feather with blur, then hard-zero above the cutoff to stop bleed
     mask_img = Image.fromarray(mask_np, mode='L')
-    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=6))
-    return mask_img
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=8))
+    mask_arr = np.array(mask_img)
+    mask_arr[:cutoff_row, :] = 0
+    return Image.fromarray(mask_arr, mode='L')
 
 
 _COLOR_MAP = {
@@ -912,72 +910,86 @@ def _parse_color_from_prompt(prompt: str):
 async def text_to_clothes_endpoint(
     reference: UploadFile = File(...),
     prompt: str = Form(...),
-    strength: str = Form('0.65'),   # kept for API compat, not used in Pix2Pix path
+    strength: str = Form('0.70'),
 ):
-    """Applies a clothing description to a human model using the Pix2Pix model.
+    """Applies a clothing description to a human model image.
 
     Pipeline:
-      1. Build a clothing-region mask (body silhouette minus face via rembg, or
-         a geometric centre-body rectangle as fallback).
-      2. Parse the dominant colour from the text prompt ("red shirt" → red RGB).
-      3. Create a synthetic doodle: clothing region filled with that colour on a
-         white background — exactly like a user drawing on the canvas.
-      4. Feed the doodle through the existing Pix2Pix model (return_rgba=True)
-         which translates the coloured region into realistic fabric texture and
-         uses rembg to cleanly remove the white background.
-      5. Alpha-composite the RGBA Pix2Pix result on top of the original reference.
-
-    Why Pix2Pix instead of SD img2img:
-      Pix2Pix was trained specifically on doodle→realistic-clothing pairs and
-      produces fabric that is spatially aligned with its input shape.  SD img2img
-      hallucinates arbitrary scenes regardless of masking strategy.
+      1. Load reference → composite to RGB (preserves pose / body shape).
+      2. Build a clothing-region mask (rembg silhouette minus top-20 % face band,
+         or geometric fallback).
+      3. Resize reference + mask to 512×512 for SD.
+      4. Run SD img2img on the ORIGINAL image at moderate strength.
+         — No white-priming: SD can see the person's pose, so generated clothing
+           stays aligned with the body.
+      5. Pixel-level composite at 512×512:
+             out = original × (1−mask) + SD_result × mask
+         Face and background pixels come 100 % from the original; only the
+         clothing region is taken from SD's output.
+      6. Resize back to original resolution and restore alpha channel.
     """
-    if pix2pix_model is None:
-        raise HTTPException(status_code=500, detail="Pix2Pix model not loaded")
+    if sd_pipe is None:
+        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
 
     start = time.perf_counter()
     print(f"👗 Text-to-Clothes: '{prompt}'")
 
     try:
         reference_bytes = await reference.read()
+        strength_val = max(0.4, min(0.85, float(strength)))
 
         # ── Load reference ───────────────────────────────────────────────────
         original_rgba = Image.open(io.BytesIO(reference_bytes)).convert('RGBA')
         reference_rgb = Image.new("RGB", original_rgba.size, (255, 255, 255))
         reference_rgb.paste(original_rgba, mask=original_rgba.split()[3])
-        w, h = reference_rgb.size   # PIL: (width, height)
+        original_size = reference_rgb.size
 
-        # ── Build clothing mask ──────────────────────────────────────────────
+        # ── Build clothing mask at original resolution ───────────────────────
         print("   🎭 Building clothing mask…")
-        mask_pil = _build_clothing_mask(reference_rgb)          # PIL 'L', (w,h)
-        mask_np  = np.array(mask_pil)                           # (h, w), 0-255
+        clothing_mask = _build_clothing_mask(reference_rgb)   # PIL 'L'
 
-        # ── Parse colour from prompt ─────────────────────────────────────────
-        color_rgb = _parse_color_from_prompt(prompt)
-        print(f"   🎨 Colour: {color_rgb}")
+        # ── Resize to 512×512 for SD ─────────────────────────────────────────
+        ref_512  = reference_rgb.resize((512, 512), Image.LANCZOS)
+        mask_512 = clothing_mask.resize((512, 512), Image.BILINEAR)
 
-        # ── Create synthetic doodle (white bg + coloured clothing region) ────
-        # Shape: (h, w, 3) — numpy is row-major: height first
-        doodle_arr = np.full((h, w, 3), 255, dtype=np.uint8)
-        cloth_px   = mask_np > 10
-        doodle_arr[cloth_px] = np.array(color_rgb, dtype=np.uint8)
+        ref_np  = np.array(ref_512).astype(np.float32)
+        mask_np = np.array(mask_512).astype(np.float32) / 255.0   # 0.0–1.0
 
-        doodle_img = Image.fromarray(doodle_arr, 'RGB')
-        doodle_io  = io.BytesIO()
-        doodle_img.save(doodle_io, 'PNG')
+        # ── Prompt ───────────────────────────────────────────────────────────
+        enhanced_prompt = (
+            f"fashion photo, person wearing {prompt}, "
+            "high quality, photorealistic, studio lighting, sharp focus, "
+            "same pose, same person"
+        )
+        negative_prompt = (
+            "deformed face, blurry face, bad anatomy, extra limbs, "
+            "low quality, watermark, text, logo"
+        )
 
-        # ── Translate via Pix2Pix (returns RGBA, background removed) ─────────
-        print("   🤖 Running Pix2Pix…")
-        p2p_io   = translate_doodle(doodle_io.getvalue(), return_rgba=True)
-        p2p_rgba = Image.open(p2p_io).convert('RGBA')
-        p2p_rgba = p2p_rgba.resize((w, h), Image.LANCZOS)
+        print(f"   📝 Prompt: {enhanced_prompt}")
+        print(f"   🎚️ Strength: {strength_val}")
 
-        # ── Composite onto original reference ────────────────────────────────
-        result = original_rgba.copy()
-        result.alpha_composite(p2p_rgba)
+        # ── SD img2img on ORIGINAL — pose / body shape fully preserved ───────
+        result_512 = sd_pipe(
+            prompt=enhanced_prompt,
+            negative_prompt=negative_prompt,
+            image=ref_512,
+            strength=strength_val,
+            num_inference_steps=30,
+            guidance_scale=7.5,
+        ).images[0]
+
+        # ── Pixel-level composite: original outside mask, SD inside mask ─────
+        result_np   = np.array(result_512).astype(np.float32)
+        final_np    = ref_np * (1.0 - mask_np[..., None]) + result_np * mask_np[..., None]
+        composited  = Image.fromarray(final_np.astype(np.uint8))
+
+        # ── Restore original resolution and alpha channel ─────────────────────
+        composited = composited.resize(original_size, Image.LANCZOS).convert('RGBA')
+        composited.putalpha(original_rgba.split()[3])
 
         byte_io = io.BytesIO()
-        result.save(byte_io, 'PNG')
+        composited.save(byte_io, 'PNG')
         byte_io.seek(0)
 
         await log_generation_event(
