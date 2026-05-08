@@ -1,5 +1,4 @@
-const inferredBaseUrl = `${window.location.protocol}//${window.location.hostname}:5001`;
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || inferredBaseUrl;
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:5001';
 
 async function parseJsonResponse(response) {
   const text = await response.text();
