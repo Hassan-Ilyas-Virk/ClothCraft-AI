@@ -66,6 +66,7 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
 AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "cc_auth")
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
+AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "lax")
 
 password_hasher = PasswordHasher()
 
@@ -136,14 +137,12 @@ def create_access_token(user_id: str) -> str:
 
 
 def set_auth_cookie(response: Response, token: str) -> None:
-    # SameSite=none + Secure are required for cross-origin cookie delivery
-    # (e.g. Vercel frontend → ngrok/cloud backend).
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=AUTH_COOKIE_SECURE,
+        samesite=AUTH_COOKIE_SAMESITE,
         max_age=JWT_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -153,8 +152,8 @@ def clear_auth_cookie(response: Response) -> None:
     response.delete_cookie(
         key=AUTH_COOKIE_NAME,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=AUTH_COOKIE_SECURE,
+        samesite=AUTH_COOKIE_SAMESITE,
         path="/",
     )
 
