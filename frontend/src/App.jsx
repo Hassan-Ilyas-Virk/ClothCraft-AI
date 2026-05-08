@@ -919,6 +919,7 @@ function App() {
             onDeleteProject={handleDeleteProject}
             onRenameProject={handleRenameProject}
             onLogout={handleLogout}
+            onUserUpdate={setCurrentUser}
         />
     );
     
@@ -926,10 +927,14 @@ function App() {
         <div className="app">
             {/* Left Sidebar Column */}
             <div className="toolbar-column">
-                <button className="app-back-btn home-sidebar-btn glass-panel" onClick={handleBackToHome} title="Back to Home">
-                    <ClothCraftLogo size={40} color="black" />
+                <button className="app-back-btn home-sidebar-btn" onClick={handleBackToHome} title="Back to Home">
+                    <ClothCraftLogo size={34} color="black" />
                 </button>
-                
+
+                {layers.length > 0 && (
+                    <div className="toolbar-column-divider" />
+                )}
+
                 {layers.length > 0 && (
                     <Toolbar
                         activeTool={activeTool}

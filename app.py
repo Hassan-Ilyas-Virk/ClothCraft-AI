@@ -103,6 +103,7 @@ def serialize_user(doc: dict[str, Any]) -> dict[str, Any]:
         "id": str(doc["_id"]),
         "email": doc["email"],
         "displayName": doc["displayName"],
+        "avatarUrl": doc.get("avatarUrl"),
         "createdAt": doc["createdAt"],
     }
 
@@ -216,6 +217,16 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+
+
+class UpdateProfileRequest(BaseModel):
+    displayName: Optional[str] = Field(None, min_length=1, max_length=120)
+    avatarUrl: Optional[str] = None  # base64 data URL, max ~150 KB
+
+
+class ChangePasswordRequest(BaseModel):
+    currentPassword: str = Field(min_length=1, max_length=128)
+    newPassword: str = Field(min_length=8, max_length=128)
 
 
 @asynccontextmanager
@@ -397,16 +408,15 @@ async def log_generation_event(
 
 
 
-def translate_doodle(doodle_bytes, return_rgba=False):
+def translate_doodle(doodle_bytes, return_rgba=False, fast=False):
     """Translates doodle using Pix2Pix model.
 
-    return_rgba=True  → returns an RGBA PNG (real transparency from rembg).
-                        Used by the live preview — no brightness stripping needed,
-                        works correctly for dark colours.
-    return_rgba=False → composites onto black and returns RGB PNG (legacy behaviour
-                        used by Clothify's per-pixel compositing logic).
+    return_rgba=True  → returns an RGBA PNG with real transparency.
+    fast=True         → skips rembg (heavy neural net); uses fast threshold BG removal instead.
+                        Ideal for live preview where speed matters more than perfect edges.
+    return_rgba=False → composites onto black and returns RGB PNG (legacy behaviour).
     """
-    print("🎨 Running Pix2Pix doodle translation...")
+    print(f"🎨 Running Pix2Pix doodle translation (fast={fast})...")
 
     original = Image.open(io.BytesIO(doodle_bytes))
 
@@ -425,6 +435,16 @@ def translate_doodle(doodle_bytes, return_rgba=False):
     output_image = (output_image * 0.5) + 0.5
     output_image = transforms.ToPILImage()(output_image)
 
+    if fast and return_rgba:
+        # Fast path: threshold-based BG removal, no rembg neural net.
+        out_np = np.array(output_image)
+        alpha_mask = (np.max(out_np, axis=2) > 20).astype(np.uint8) * 255
+        out_rgba = np.dstack([out_np, alpha_mask])
+        byte_io = io.BytesIO()
+        Image.fromarray(out_rgba, 'RGBA').save(byte_io, 'PNG')
+        byte_io.seek(0)
+        return byte_io
+
     try:
         from rembg import remove as rembg_remove
         print("   🪄 Removing Pix2Pix background using rembg...")
@@ -435,7 +455,6 @@ def translate_doodle(doodle_bytes, return_rgba=False):
         output_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
 
         if return_rgba:
-            # Return real alpha channel — frontend composites with source-over, no stripping.
             byte_io = io.BytesIO()
             output_rgba.save(byte_io, 'PNG')
             byte_io.seek(0)
@@ -610,12 +629,13 @@ def outpaint_to_full_body(img_pil):
 async def translate_doodle_endpoint(
     file: UploadFile = File(...),
     rgba: bool = Query(False, description="Return RGBA PNG with real transparency instead of black-background RGB"),
+    fast: bool = Query(False, description="Skip rembg; use threshold BG removal for low-latency live preview"),
 ):
     """Translates doodle using Pix2Pix model"""
     start = time.perf_counter()
     try:
         img_bytes = await file.read()
-        result_bytes = translate_doodle(img_bytes, return_rgba=rgba)
+        result_bytes = translate_doodle(img_bytes, return_rgba=rgba, fast=fast)
         await log_generation_event(
             endpoint="translate-doodle",
             status="success",
@@ -1478,6 +1498,44 @@ async def logout():
 @app.get('/auth/me')
 async def auth_me(current_user: dict[str, Any] = Depends(get_current_user)):
     return JSONResponse(serialize_user(current_user))
+
+
+@app.patch('/auth/profile')
+async def update_profile(
+    payload: UpdateProfileRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    mongo: MongoManager = app.state.mongo
+    updates: dict[str, Any] = {"updatedAt": utc_timestamp_ms()}
+    if payload.displayName is not None:
+        updates["displayName"] = payload.displayName.strip()
+    if payload.avatarUrl is not None:
+        if len(payload.avatarUrl) > 250_000:
+            raise HTTPException(status_code=400, detail="Avatar image too large (max ~180 KB)")
+        updates["avatarUrl"] = payload.avatarUrl
+    updated = await mongo.db["users"].find_one_and_update(
+        {"_id": current_user["_id"]},
+        {"$set": updates},
+        return_document=True,
+    )
+    return JSONResponse(serialize_user(updated))
+
+
+@app.post('/auth/change-password')
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        password_hasher.verify(current_user["passwordHash"], payload.currentPassword)
+    except (VerifyMismatchError, InvalidHash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    mongo: MongoManager = app.state.mongo
+    await mongo.db["users"].update_one(
+        {"_id": current_user["_id"]},
+        {"$set": {"passwordHash": password_hasher.hash(payload.newPassword), "updatedAt": utc_timestamp_ms()}},
+    )
+    return JSONResponse({"success": True})
 
 
 @app.post('/projects')

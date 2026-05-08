@@ -60,7 +60,7 @@ const Toolbar = ({
                             disabled={disabled}
                             title={tool.label}
                         >
-                            <IconComponent size={20} strokeWidth={2} />
+                            <IconComponent size={18} strokeWidth={2} />
                             <span className="toolbar-tool-tooltip">{tool.label}</span>
                         </button>
                         {(index === 2 || index === 6) && <div className="toolbar-divider" />}
@@ -76,7 +76,7 @@ const Toolbar = ({
                 disabled={disabled || !canUndo}
                 title="Undo (Ctrl/Cmd+Z)"
             >
-                <Undo2 size={20} strokeWidth={2} />
+                <Undo2 size={18} strokeWidth={2} />
                 <span className="toolbar-tool-tooltip">Undo</span>
             </button>
 
@@ -86,7 +86,7 @@ const Toolbar = ({
                 disabled={disabled || !canRedo}
                 title="Redo (Ctrl/Cmd+Shift+Z or Ctrl+Y)"
             >
-                <Redo2 size={20} strokeWidth={2} />
+                <Redo2 size={18} strokeWidth={2} />
                 <span className="toolbar-tool-tooltip">Redo</span>
             </button>
 
@@ -98,7 +98,7 @@ const Toolbar = ({
                 disabled={disabled}
                 title={liveMode ? 'Disable Live Preview' : 'Enable Live Pix2Pix Preview'}
             >
-                <Zap size={20} strokeWidth={2} />
+                <Zap size={18} strokeWidth={2} />
                 <span className="toolbar-tool-tooltip">{liveMode ? 'Live: ON' : 'Live Preview'}</span>
             </button>
 
@@ -108,7 +108,7 @@ const Toolbar = ({
                     onClick={onOpenMoodboard}
                     title="Open Moodboard Color Extractor"
                 >
-                    <Palette size={18} strokeWidth={2} />
+                    <Palette size={16} strokeWidth={2} />
                 </div>
                 <div className="toolbar-color-picker" title="Color">
                     <input

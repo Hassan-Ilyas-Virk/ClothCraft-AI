@@ -1,33 +1,21 @@
-/**
- * HomePage — project listing and creation.
- * All data operations are delegated to service callbacks passed as props.
- *
- * Props:
- *   user           {object}   current user { id, email, displayName }
- *   projects       {array}    list of project objects
- *   onNewProject   {function} () => void
- *   onOpenProject  {function} (project) => void
- *   onDeleteProject{function} (projectId) => void
- *   onRenameProject{function} (projectId, newName) => void
- *   onLogout       {function} () => void
- */
 import React, { useState, useRef } from 'react';
 import {
   Sparkles, Plus, LogOut, Trash2, FolderOpen,
-  PenLine, Clock, MoreVertical, ImageIcon
+  PenLine, Clock, MoreVertical, ImageIcon, Settings
 } from 'lucide-react';
 import { formatProjectDate } from '../services/projects';
 import ClothCraftLogo from '../components/ClothCraftLogo';
+import ProfileModal from '../components/ProfileModal';
 import './HomePage.css';
 
-/* ── Sub-components ─────────────────────────────────────────────────── */
+/* ── ProjectCard ──────────────────────────────────────────────────── */
 
 const ProjectCard = ({ project, onOpen, onDelete, onRename }) => {
-  const [menuOpen, setMenuOpen]     = useState(false);
-  const [renaming, setRenaming]     = useState(false);
-  const [nameVal, setNameVal]       = useState(project.name);
+  const [menuOpen, setMenuOpen]       = useState(false);
+  const [renaming, setRenaming]       = useState(false);
+  const [nameVal, setNameVal]         = useState(project.name);
   const [renameError, setRenameError] = useState('');
-  const nameInputRef                = useRef(null);
+  const nameInputRef                  = useRef(null);
 
   const startRename = () => {
     setMenuOpen(false);
@@ -38,17 +26,8 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename }) => {
 
   const commitRename = async () => {
     const trimmed = nameVal.trim();
-    if (!trimmed) {
-      setNameVal(project.name);
-      setRenaming(false);
-      setRenameError('');
-      return;
-    }
-    if (trimmed === project.name) {
-      setRenaming(false);
-      setRenameError('');
-      return;
-    }
+    if (!trimmed) { setNameVal(project.name); setRenaming(false); setRenameError(''); return; }
+    if (trimmed === project.name) { setRenaming(false); setRenameError(''); return; }
     try {
       await onRename(project.id, trimmed);
       setRenameError('');
@@ -62,92 +41,71 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename }) => {
 
   return (
     <div className="hp-card-stack">
-    <div className="hp-card" onClick={() => !renaming && !menuOpen && onOpen(project)}>
-      {/* Thumbnail */}
-      <div className="hp-card-thumb">
-        {project.thumbnail ? (
-          <img src={project.thumbnail} alt={project.name} draggable={false} />
-        ) : (
-          <div className="hp-card-thumb-empty">
-            <ImageIcon size={36} strokeWidth={1} />
-          </div>
-        )}
-        {/* Hover overlay */}
-        <div className="hp-card-overlay">
-          <button
-            className="hp-card-open-btn"
-            onClick={e => { e.stopPropagation(); onOpen(project); }}
-          >
-            <FolderOpen size={16} />
-            Open
-          </button>
-        </div>
-      </div>
-
-      {/* Footer */}
-      <div className="hp-card-footer">
-        <div className="hp-card-meta">
-          {renaming ? (
-            <div className="hp-rename-wrap">
-              <input
-                ref={nameInputRef}
-                className="hp-card-rename-input"
-                value={nameVal}
-                onChange={e => { setNameVal(e.target.value); if (renameError) setRenameError(''); }}
-                onBlur={() => { void commitRename(); }}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') { e.preventDefault(); void commitRename(); }
-                  if (e.key === 'Escape') { setNameVal(project.name); setRenaming(false); setRenameError(''); }
-                  e.stopPropagation();
-                }}
-                onClick={e => e.stopPropagation()}
-                autoFocus
-              />
-            </div>
+      <div className="hp-card" onClick={() => !renaming && !menuOpen && onOpen(project)}>
+        <div className="hp-card-thumb">
+          {project.thumbnail ? (
+            <img src={project.thumbnail} alt={project.name} draggable={false} />
           ) : (
-            <span className="hp-card-name">{project.name}</span>
+            <div className="hp-card-thumb-empty"><ImageIcon size={36} strokeWidth={1} /></div>
           )}
-          <span className="hp-card-date">
-            <Clock size={11} />
-            {formatProjectDate(project.updatedAt)}
-          </span>
+          <div className="hp-card-overlay">
+            <button className="hp-card-open-btn" onClick={e => { e.stopPropagation(); onOpen(project); }}>
+              <FolderOpen size={16} /> Open
+            </button>
+          </div>
         </div>
 
-        {/* Context menu */}
-        <div className="hp-card-menu-wrap" onClick={e => e.stopPropagation()}>
-          <button
-            className="hp-card-menu-btn"
-            onClick={() => setMenuOpen(v => !v)}
-            aria-label="More options"
-          >
-            <MoreVertical size={16} />
-          </button>
-          {menuOpen && (
-            <div className="hp-card-menu">
-              <button onClick={startRename}>
-                <PenLine size={14} /> Rename
-              </button>
-              <button
-                className="hp-card-menu--danger"
-                onClick={() => { setMenuOpen(false); onDelete(project.id); }}
-              >
-                <Trash2 size={14} /> Delete
-              </button>
-            </div>
-          )}
+        <div className="hp-card-footer">
+          <div className="hp-card-meta">
+            {renaming ? (
+              <div className="hp-rename-wrap">
+                <input
+                  ref={nameInputRef}
+                  className="hp-card-rename-input"
+                  value={nameVal}
+                  onChange={e => { setNameVal(e.target.value); if (renameError) setRenameError(''); }}
+                  onBlur={() => { void commitRename(); }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); void commitRename(); }
+                    if (e.key === 'Escape') { setNameVal(project.name); setRenaming(false); setRenameError(''); }
+                    e.stopPropagation();
+                  }}
+                  onClick={e => e.stopPropagation()}
+                  autoFocus
+                />
+              </div>
+            ) : (
+              <span className="hp-card-name">{project.name}</span>
+            )}
+            <span className="hp-card-date">
+              <Clock size={11} />
+              {formatProjectDate(project.updatedAt)}
+            </span>
+          </div>
+
+          <div className="hp-card-menu-wrap" onClick={e => e.stopPropagation()}>
+            <button className="hp-card-menu-btn" onClick={() => setMenuOpen(v => !v)} aria-label="More options">
+              <MoreVertical size={16} />
+            </button>
+            {menuOpen && (
+              <div className="hp-card-menu">
+                <button onClick={startRename}><PenLine size={14} /> Rename</button>
+                <button className="hp-card-menu--danger" onClick={() => { setMenuOpen(false); onDelete(project.id); }}>
+                  <Trash2 size={14} /> Delete
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </div>
-    {renameError && <div className="hp-card-error-below">{renameError}</div>}
+      {renameError && <div className="hp-card-error-below">{renameError}</div>}
     </div>
   );
 };
 
 const NewProjectCard = ({ onClick }) => (
   <button className="hp-card hp-card--new" onClick={onClick}>
-    <div className="hp-card-thumb hp-card-thumb--new">
-      <Plus size={32} strokeWidth={1.5} />
-    </div>
+    <div className="hp-card-thumb hp-card-thumb--new"><Plus size={32} strokeWidth={1.5} /></div>
     <div className="hp-card-footer hp-card-footer--new">
       <span className="hp-card-name">New Design</span>
       <span className="hp-card-date">Start fresh</span>
@@ -155,10 +113,12 @@ const NewProjectCard = ({ onClick }) => (
   </button>
 );
 
-/* ── Main component ─────────────────────────────────────────────────── */
+/* ── Main ─────────────────────────────────────────────────────────── */
 
-const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject, onRenameProject, onLogout }) => {
-  const [confirmDelete, setConfirmDelete] = useState(null); // projectId to confirm
+const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject, onRenameProject, onLogout, onUserUpdate }) => {
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [showProfile, setShowProfile]     = useState(false);
+  const [localUser, setLocalUser]         = useState(user);
 
   const greeting = () => {
     const h = new Date().getHours();
@@ -167,9 +127,9 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
     return 'Good evening';
   };
 
-  const handleDeleteConfirm = (id) => {
-    onDeleteProject(id);
-    setConfirmDelete(null);
+  const handleUserUpdate = (updated) => {
+    setLocalUser(updated);
+    onUserUpdate?.(updated);
   };
 
   const initials = (name) =>
@@ -177,45 +137,49 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
 
   return (
     <div className="hp-root">
-      {/* Header */}
+      {/* ── Header ── */}
       <header className="hp-header">
         <div className="hp-header-brand">
           <div className="hp-header-logo">
-            <ClothCraftLogo size={20} color="white" />
+            <ClothCraftLogo size={18} color="white" />
           </div>
           <span className="hp-header-title">ClothCraft AI</span>
         </div>
 
-        <div className="hp-header-user">
-          <div className="hp-avatar">{initials(user?.displayName)}</div>
-          <span className="hp-header-username">{user?.displayName}</span>
+        <div className="hp-header-actions">
+          <button className="hp-new-btn hp-new-btn--header" onClick={onNewProject}>
+            <Plus size={15} strokeWidth={2.5} /> New Design
+          </button>
+
+          <button className="hp-user-btn" onClick={() => setShowProfile(true)} title="Profile settings">
+            {localUser?.avatarUrl ? (
+              <img src={localUser.avatarUrl} alt="avatar" className="hp-avatar-img" />
+            ) : (
+              <div className="hp-avatar">{initials(localUser?.displayName)}</div>
+            )}
+            <span className="hp-header-username">{localUser?.displayName}</span>
+            <Settings size={14} className="hp-user-settings-icon" />
+          </button>
+
           <button className="hp-logout-btn" onClick={onLogout} title="Sign out">
-            <LogOut size={16} />
+            <LogOut size={15} />
           </button>
         </div>
       </header>
 
-      {/* Hero strip */}
+      {/* ── Hero strip ── */}
       <div className="hp-hero">
-        <p className="hp-hero-greeting">{greeting()}, {user?.displayName?.split(' ')[0]} ✦</p>
+        <p className="hp-hero-greeting">{greeting()}, {localUser?.displayName?.split(' ')[0]} ✦</p>
         <h2 className="hp-hero-heading">Your designs</h2>
-        <button className="hp-new-btn" onClick={onNewProject}>
-          <Plus size={16} strokeWidth={2.5} />
-          New Design
-        </button>
       </div>
 
-      {/* Projects grid */}
+      {/* ── Projects grid ── */}
       <main className="hp-main">
         {projects.length === 0 ? (
           <div className="hp-empty">
-            <div className="hp-empty-icon">
-              <Sparkles size={52} strokeWidth={1} />
-            </div>
+            <div className="hp-empty-icon"><Sparkles size={52} strokeWidth={1} /></div>
             <h3 className="hp-empty-title">No designs yet</h3>
-            <p className="hp-empty-text">
-              Start a new project and bring your fashion ideas to life.
-            </p>
+            <p className="hp-empty-text">Start a new project and bring your fashion ideas to life.</p>
             <button className="hp-new-btn" onClick={onNewProject}>
               <Plus size={15} /> Create your first design
             </button>
@@ -236,7 +200,7 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
         )}
       </main>
 
-      {/* Delete confirm dialog */}
+      {/* ── Delete confirm ── */}
       {confirmDelete && (
         <div className="hp-dialog-backdrop" onClick={() => setConfirmDelete(null)}>
           <div className="hp-dialog" onClick={e => e.stopPropagation()}>
@@ -244,15 +208,20 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
             <h3 className="hp-dialog-title">Delete this design?</h3>
             <p className="hp-dialog-text">This action cannot be undone.</p>
             <div className="hp-dialog-actions">
-              <button className="hp-dialog-cancel" onClick={() => setConfirmDelete(null)}>
-                Cancel
-              </button>
-              <button className="hp-dialog-confirm" onClick={() => handleDeleteConfirm(confirmDelete)}>
-                Delete
-              </button>
+              <button className="hp-dialog-cancel" onClick={() => setConfirmDelete(null)}>Cancel</button>
+              <button className="hp-dialog-confirm" onClick={() => { onDeleteProject(confirmDelete); setConfirmDelete(null); }}>Delete</button>
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Profile modal ── */}
+      {showProfile && (
+        <ProfileModal
+          user={localUser}
+          onClose={() => setShowProfile(false)}
+          onUserUpdate={handleUserUpdate}
+        />
       )}
     </div>
   );

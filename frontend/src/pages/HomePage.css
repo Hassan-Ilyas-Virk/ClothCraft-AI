@@ -14,18 +14,20 @@
 
 /* ── Header ── */
 .hp-header {
-  height: 60px;
-  background: linear-gradient(135deg, #0d0b1a 0%, #111827 100%);
+  height: 58px;
+  background: #ffffff;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 28px;
-  box-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 4px 20px rgba(0,0,0,0.35);
+  padding: 0 24px;
+  border-bottom: 1px solid #ede8ff;
+  box-shadow: 0 1px 12px rgba(139, 92, 246, 0.07);
   flex-shrink: 0;
   position: sticky;
   top: 0;
   z-index: 50;
 }
+
 .hp-header-brand {
   display: flex;
   align-items: center;
@@ -35,82 +37,121 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   background: var(--btn-purple);
   border-radius: 8px;
-  color: white;
 }
 .hp-header-title {
-  color: #c4b5fd;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 800;
+  color: #1a1035;
+  letter-spacing: -0.2px;
 }
-.hp-header-user {
+
+/* Right side actions */
+.hp-header-actions {
   display: flex;
   align-items: center;
   gap: 10px;
 }
+
+/* New Design button in header (smaller) */
+.hp-new-btn--header {
+  padding: 7px 14px;
+  font-size: 13px;
+}
+
+/* Clickable user chip */
+.hp-user-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 4px;
+  border: 1.5px solid #ede8ff;
+  border-radius: 999px;
+  background: #faf8ff;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.hp-user-btn:hover {
+  background: #f0ebff;
+  border-color: #c4b5fd;
+}
+
 .hp-avatar {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
-  background: var(--btn-purple);
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
   color: white;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 800;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
-.hp-header-username {
-  font-size: 13.5px;
-  color: rgba(255,255,255,0.7);
-  font-weight: 500;
+
+.hp-avatar-img {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  flex-shrink: 0;
 }
+
+.hp-header-username {
+  font-size: 13px;
+  color: #1a1035;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hp-user-settings-icon {
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+
 .hp-logout-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   background: transparent;
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 8px;
-  color: rgba(255,255,255,0.45);
+  border: 1.5px solid #e5e7eb;
+  border-radius: 9px;
+  color: #9ca3af;
   cursor: pointer;
   transition: all 0.18s;
 }
 .hp-logout-btn:hover {
-  background: rgba(255,255,255,0.07);
-  color: rgba(255,255,255,0.85);
-  border-color: rgba(255,255,255,0.25);
+  background: #fef2f2;
+  color: #ef4444;
+  border-color: #fca5a5;
 }
 
 /* ── Hero strip ── */
 .hp-hero {
-  display: flex;
-  align-items: baseline;
-  gap: 16px;
-  padding: 28px 32px 10px;
-  flex-wrap: wrap;
+  padding: 24px 32px 8px;
 }
 .hp-hero-greeting {
-  font-size: 13px;
+  font-size: 12.5px;
   color: #9d8fcc;
   font-weight: 500;
   letter-spacing: 0.2px;
-  flex-basis: 100%;
-  margin-bottom: -4px;
+  margin-bottom: 4px;
 }
 .hp-hero-heading {
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 800;
-  letter-spacing: -0.6px;
+  letter-spacing: -0.5px;
   color: #1a1035;
-  flex: 1;
-  min-width: 0;
 }
+
+/* New Design button (used in empty state + header) */
 .hp-new-btn {
   display: inline-flex;
   align-items: center;
@@ -124,13 +165,13 @@
   font-weight: 700;
   cursor: pointer;
   flex-shrink: 0;
-  box-shadow: 0 4px 16px rgba(139, 92, 246, 0.35);
-  transition: transform 0.18s, box-shadow 0.18s;
+  box-shadow: 0 4px 16px rgba(139, 92, 246, 0.3);
+  transition: transform 0.18s, box-shadow 0.18s, background 0.15s;
 }
 .hp-new-btn:hover {
   background: var(--btn-purple-hover);
   transform: translateY(-1px);
-  box-shadow: 0 8px 24px rgba(139, 92, 246, 0.45);
+  box-shadow: 0 8px 24px rgba(139, 92, 246, 0.4);
 }
 .hp-new-btn:active { transform: translateY(0); }
 
