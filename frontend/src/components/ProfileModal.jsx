@@ -102,23 +102,13 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
         </div>
 
         {/* Tabs */}
-        <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid #f0ebff', flexShrink: 0 }}>
-          {[['profile', <User size={14} />, 'Profile'], ['password', <Lock size={14} />, 'Password']].map(([key, icon, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              style={{
-                flex: 1, padding: '11px 0', border: 'none', background: 'none',
-                fontSize: 13, fontWeight: 700, cursor: 'pointer',
-                color: tab === key ? '#7c3aed' : '#9ca3af',
-                borderBottom: `2px solid ${tab === key ? '#8b5cf6' : 'transparent'}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                transition: 'color 0.15s',
-              }}
-            >
-              {icon}{label}
-            </button>
-          ))}
+        <div className="pm-tabs">
+          <button className={`pm-tab${tab === 'profile' ? ' active' : ''}`} onClick={() => setTab('profile')}>
+            <User size={14} /> Profile
+          </button>
+          <button className={`pm-tab${tab === 'password' ? ' active' : ''}`} onClick={() => setTab('password')}>
+            <Lock size={14} /> Password
+          </button>
         </div>
 
         {/* Body */}

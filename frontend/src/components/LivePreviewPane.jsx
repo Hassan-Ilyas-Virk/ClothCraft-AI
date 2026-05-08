@@ -2,19 +2,52 @@ import React, { useEffect, useRef, useState } from 'react';
 import API_BASE, { NGROK_HEADERS } from '../config.js';
 import './LivePreviewPane.css';
 
+// Content-hash cache: avoids re-running Pix2Pix on unchanged layers
+const resultCache = new Map(); // hex hash → result blob URL
+const MAX_CACHE = 30;
+
+async function hashBlob(blob) {
+  const buf = await blob.arrayBuffer();
+  const hashBuf = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function downscaleBlob(blob, maxSize = 512) {
+  const bitmap = await createImageBitmap(blob);
+  const scale = Math.min(maxSize / bitmap.width, maxSize / bitmap.height, 1);
+  const w = Math.round(bitmap.width * scale);
+  const h = Math.round(bitmap.height * scale);
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  return new Promise(res => cv.toBlob(res, 'image/png'));
+}
+
 async function sendToPix2Pix(blob) {
+  const small = await downscaleBlob(blob, 512);
+  const hash = await hashBlob(small);
+
+  if (resultCache.has(hash)) return resultCache.get(hash);
+
   const formData = new FormData();
-  formData.append('file', blob, 'doodle.png');
-  // rgba=true → backend returns RGBA PNG with real rembg transparency.
-  // No brightness-threshold stripping needed, so dark colours have no holes
-  // and light colours have no black fringe.
-  const res = await fetch(`${API_BASE}/translate-doodle?rgba=true`, {
+  formData.append('file', small, 'doodle.png');
+  const res = await fetch(`${API_BASE}/translate-doodle?rgba=true&fast=true`, {
     method: 'POST',
     headers: NGROK_HEADERS,
     body: formData,
   });
   if (!res.ok) throw new Error(`Pix2Pix server error ${res.status}`);
-  return res.blob();
+  const resultBlob = await res.blob();
+  const url = URL.createObjectURL(resultBlob);
+
+  if (resultCache.size >= MAX_CACHE) {
+    const oldest = resultCache.keys().next().value;
+    URL.revokeObjectURL(resultCache.get(oldest));
+    resultCache.delete(oldest);
+  }
+  resultCache.set(hash, url);
+  return url;
 }
 
 function loadImage(src) {
@@ -62,35 +95,39 @@ const LivePreviewPane = ({ layers, canvasRef, canvasSize }) => {
           ctx.fillRect(0, 0, width, height);
         }
 
-        // Each visible drawing layer is processed independently through Pix2Pix
         const drawingLayers = layers.filter(l => l.type !== 'reference' && l.visible);
-        let processed = 0;
 
+        // Fetch all layer blobs first (must be sequential — canvas access)
+        const layerBlobs = [];
         for (const layer of drawingLayers) {
           if (gen !== genRef.current) return;
-
           const blob = await canvasRef.current.getLayerBlob(layer.id);
-          if (!blob || gen !== genRef.current) return;
+          layerBlobs.push({ layer, blob });
+        }
 
-          let translatedBlob;
-          try {
-            translatedBlob = await sendToPix2Pix(blob);
-          } catch {
-            continue;
-          }
-          if (gen !== genRef.current) return;
+        if (gen !== genRef.current) return;
 
-          const translatedUrl = URL.createObjectURL(translatedBlob);
-          try {
-            const img = await loadImage(translatedUrl);
+        // Translate all layers in parallel (Pix2Pix calls are independent)
+        const translations = await Promise.allSettled(
+          layerBlobs.map(({ layer, blob }) =>
+            blob ? sendToPix2Pix(blob).then(url => ({ layer, url })) : Promise.resolve(null)
+          )
+        );
+
+        if (gen !== genRef.current) return;
+
+        // Composite results in layer order
+        let processed = 0;
+        for (const result of translations) {
+          if (result.status === 'fulfilled' && result.value) {
+            const { layer, url } = result.value;
+            const img = await loadImage(url);
             ctx.globalAlpha = layer.opacity ?? 1;
             ctx.globalCompositeOperation = layer.blendMode || 'source-over';
             ctx.drawImage(img, 0, 0, width, height);
             ctx.globalAlpha = 1;
             ctx.globalCompositeOperation = 'source-over';
             processed++;
-          } finally {
-            URL.revokeObjectURL(translatedUrl);
           }
         }
 
@@ -102,7 +139,7 @@ const LivePreviewPane = ({ layers, canvasRef, canvasSize }) => {
       } finally {
         if (gen === genRef.current) setLoading(false);
       }
-    }, 650);
+    }, 700);
 
     return () => clearTimeout(debounceRef.current);
   }, [layers, canvasSize.width, canvasSize.height]);

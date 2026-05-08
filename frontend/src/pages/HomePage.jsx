@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   Sparkles, Plus, LogOut, Trash2, FolderOpen,
   PenLine, Clock, MoreVertical, ImageIcon, Settings
@@ -10,12 +10,50 @@ import './HomePage.css';
 
 /* ── ProjectCard ──────────────────────────────────────────────────── */
 
-const ProjectCard = ({ project, onOpen, onDelete, onRename }) => {
-  const [menuOpen, setMenuOpen]       = useState(false);
-  const [renaming, setRenaming]       = useState(false);
-  const [nameVal, setNameVal]         = useState(project.name);
+const ProjectCard = ({ project, onOpen, onDelete, onRename, onHover }) => {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [nameVal, setNameVal] = useState(project.name);
   const [renameError, setRenameError] = useState('');
-  const nameInputRef                  = useRef(null);
+  const nameInputRef = useRef(null);
+
+  const thumbSrc = useMemo(() => {
+    if (project.layersSnapshot) {
+      try {
+        const { layers } = JSON.parse(project.layersSnapshot);
+        const ref = layers?.find(l => l.type === 'reference' && l.canvasData);
+        if (ref?.canvasData) return ref.canvasData;
+      } catch { }
+    }
+    return project.thumbnail || null;
+  }, [project.layersSnapshot, project.thumbnail]);
+
+  const [glowColor, setGlowColor] = useState('rgba(139,92,246,0.75)');
+  useEffect(() => {
+    if (!thumbSrc) return;
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const cv = document.createElement('canvas');
+        cv.width = 10; cv.height = 10;
+        const ctx = cv.getContext('2d');
+        ctx.drawImage(img, 0, 0, 10, 10);
+        const d = ctx.getImageData(0, 0, 10, 10).data;
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const pr = d[i], pg = d[i + 1], pb = d[i + 2], pa = d[i + 3];
+          if (pa < 60) continue;
+          const mx = Math.max(pr, pg, pb);
+          const mn = Math.min(pr, pg, pb);
+          // skip near-white, near-black, and low-saturation (grey) pixels
+          if (mx < 45 || mx > 215 || (mx - mn) / (mx || 1) < 0.18) continue;
+          r += pr; g += pg; b += pb; n++;
+        }
+        if (n >= 3) setGlowColor(`rgba(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)},0.85)`);
+      } catch { }
+    };
+    img.src = thumbSrc;
+  }, [thumbSrc]);
 
   const startRename = () => {
     setMenuOpen(false);
@@ -40,11 +78,19 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename }) => {
   };
 
   return (
-    <div className="hp-card-stack">
+    <div
+      className="hp-card-stack"
+      style={{ '--card-glow': glowColor }}
+      onMouseEnter={() => onHover?.(glowColor)}
+      onMouseLeave={() => onHover?.(null)}
+    >
       <div className="hp-card" onClick={() => !renaming && !menuOpen && onOpen(project)}>
         <div className="hp-card-thumb">
-          {project.thumbnail ? (
-            <img src={project.thumbnail} alt={project.name} draggable={false} />
+          {thumbSrc ? (
+            <>
+              <img className="hp-card-thumb-blur" src={thumbSrc} aria-hidden alt="" draggable={false} />
+              <img className="hp-card-thumb-img" src={thumbSrc} alt={project.name} draggable={false} />
+            </>
           ) : (
             <div className="hp-card-thumb-empty"><ImageIcon size={36} strokeWidth={1} /></div>
           )}
@@ -117,8 +163,9 @@ const NewProjectCard = ({ onClick }) => (
 
 const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject, onRenameProject, onLogout, onUserUpdate }) => {
   const [confirmDelete, setConfirmDelete] = useState(null);
-  const [showProfile, setShowProfile]     = useState(false);
-  const [localUser, setLocalUser]         = useState(user);
+  const [showProfile, setShowProfile] = useState(false);
+  const [localUser, setLocalUser] = useState(user);
+  const [bgAccent, setBgAccent] = useState(null);
 
   const greeting = () => {
     const h = new Date().getHours();
@@ -137,6 +184,15 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
 
   return (
     <div className="hp-root">
+      {/* ── Page background accent (dominant color of hovered card) ── */}
+      <div
+        className="hp-bg-accent"
+        style={{
+          backgroundColor: bgAccent || 'transparent',
+          opacity: bgAccent ? 0.20 : 0,
+        }}
+      />
+
       {/* ── Header ── */}
       <header className="hp-header">
         <div className="hp-header-brand">
@@ -147,10 +203,6 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
         </div>
 
         <div className="hp-header-actions">
-          <button className="hp-new-btn hp-new-btn--header" onClick={onNewProject}>
-            <Plus size={15} strokeWidth={2.5} /> New Design
-          </button>
-
           <button className="hp-user-btn" onClick={() => setShowProfile(true)} title="Profile settings">
             {localUser?.avatarUrl ? (
               <img src={localUser.avatarUrl} alt="avatar" className="hp-avatar-img" />
@@ -194,6 +246,7 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
                 onOpen={onOpenProject}
                 onDelete={(id) => setConfirmDelete(id)}
                 onRename={onRenameProject}
+                onHover={setBgAccent}
               />
             ))}
           </div>

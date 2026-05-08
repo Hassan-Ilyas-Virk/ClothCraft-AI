@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:\\\\Users\\\\hassa\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe -m pip install rembg[gpu])",
+      "PowerShell(& \"C:\\\\Users\\\\hassa\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -m pip install \"rembg[gpu]\" 2>&1 | Select-Object -Last 8)",
+      "PowerShell(& \"C:\\\\Users\\\\hassa\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\python.exe\" -m pip install \"rembg[gpu]\" 2>&1 | Select-Object -Last 10)",
+      "Bash(cd /d D:\\\\FYP\\\\frontapp)",
+      "Bash(taskkill /F /IM python.exe)",
+      "PowerShell(taskkill *)",
+      "PowerShell(Start-Process -FilePath \"python.exe\" -ArgumentList \"D:\\\\FYP\\\\frontapp\\\\app.py\" -WorkingDirectory \"D:\\\\FYP\\\\frontapp\" -RedirectStandardOutput \"D:\\\\FYP\\\\frontapp\\\\server.log\" -RedirectStandardError \"D:\\\\FYP\\\\frontapp\\\\server_err.log\" -WindowStyle Hidden; Write-Host \"Backend starting...\")",
+      "PowerShell($deadline = \\(Get-Date\\).AddSeconds\\(90\\); while \\(\\(Get-Date\\) -lt $deadline\\) { Start-Sleep -Seconds 5; $log = Get-Content \"D:\\\\FYP\\\\frontapp\\\\server_err.log\" -ErrorAction SilentlyContinue; if \\($log -match \"Application startup complete\"\\) { Write-Host \"Ready\"; break } }; Get-Content \"D:\\\\FYP\\\\frontapp\\\\server_err.log\" -Tail 5)",
+      "PowerShell($deadline = \\(Get-Date\\).AddSeconds\\(90\\); while \\(\\(Get-Date\\) -lt $deadline\\) { Start-Sleep -Seconds 5; $log = Get-Content \"D:\\\\FYP\\\\frontapp\\\\server_err.log\" -ErrorAction SilentlyContinue; if \\($log -match \"Application startup complete\"\\) { Write-Host \"Ready\"; break } }; Get-Content \"D:\\\\FYP\\\\frontapp\\\\server.log\" -Tail 10)",
+      "Bash(git reset *)"
+    ]
+  }
+}

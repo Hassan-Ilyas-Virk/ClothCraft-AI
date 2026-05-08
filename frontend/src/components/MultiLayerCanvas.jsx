@@ -377,20 +377,21 @@ const MultiLayerCanvas = forwardRef(({
 
     const buildThumbnailFromData = (data) => {
         return new Promise((resolve) => {
+            const SZ = 480;
             const thumbnailCanvas = document.createElement('canvas');
-            thumbnailCanvas.width = 100;
-            thumbnailCanvas.height = 100;
+            thumbnailCanvas.width = SZ;
+            thumbnailCanvas.height = SZ;
             const tCtx = thumbnailCanvas.getContext('2d');
             const img = new Image();
             img.onload = () => {
-                tCtx.clearRect(0, 0, 100, 100);
-                const scale = Math.min(100 / img.width, 100 / img.height);
+                tCtx.clearRect(0, 0, SZ, SZ);
+                const scale = Math.min(SZ / img.width, SZ / img.height);
                 const drawW = img.width * scale;
                 const drawH = img.height * scale;
-                const drawX = (100 - drawW) / 2;
-                const drawY = (100 - drawH) / 2;
+                const drawX = (SZ - drawW) / 2;
+                const drawY = (SZ - drawH) / 2;
                 tCtx.drawImage(img, drawX, drawY, drawW, drawH);
-                resolve(thumbnailCanvas.toDataURL('image/png'));
+                resolve(thumbnailCanvas.toDataURL('image/jpeg', 0.82));
             };
             img.src = data;
         });
@@ -1432,21 +1433,22 @@ const MultiLayerCanvas = forwardRef(({
             // Calculate content bounds
             const bounds = getContentBounds(canvas);
 
+            const SZ = 480;
             const thumbnailCanvas = document.createElement('canvas');
-            thumbnailCanvas.width = 100;
-            thumbnailCanvas.height = 100;
+            thumbnailCanvas.width = SZ;
+            thumbnailCanvas.height = SZ;
             const tCtx = thumbnailCanvas.getContext('2d');
 
             const img = new Image();
             img.onload = () => {
-                tCtx.clearRect(0, 0, 100, 100);
-                const scale = Math.min(100 / img.width, 100 / img.height);
+                tCtx.clearRect(0, 0, SZ, SZ);
+                const scale = Math.min(SZ / img.width, SZ / img.height);
                 const drawW = img.width * scale;
                 const drawH = img.height * scale;
-                const drawX = (100 - drawW) / 2;
-                const drawY = (100 - drawH) / 2;
+                const drawX = (SZ - drawW) / 2;
+                const drawY = (SZ - drawH) / 2;
                 tCtx.drawImage(img, drawX, drawY, drawW, drawH);
-                const thumbnail = thumbnailCanvas.toDataURL('image/png');
+                const thumbnail = thumbnailCanvas.toDataURL('image/jpeg', 0.82);
                 onLayerUpdate(layerId, { thumbnail, canvasData: data, bounds });
             };
             img.src = data;
