@@ -852,10 +852,16 @@ async def text_to_clothes_endpoint(
     Pipeline:
       1. Build a clothing-region mask (body silhouette minus face, via rembg or
          geometric fallback).
-      2. White-prime the masked area so SD knows it must generate there.
-      3. Run img2img on the primed image at moderate strength.
-      4. Pixel-perfect composite: original pixels outside the mask, SD result
-         inside — face and background are NEVER changed.
+      2. Run img2img on the ORIGINAL image (no white-priming) so SD can see the
+         person's pose, body contours and existing garment structure.
+      3. Pixel-perfect composite: original pixels outside the mask (face and
+         background are NEVER changed), SD result only inside the clothing mask.
+
+    Why no white-priming: filling the clothing area white destroys all pose
+    information.  SD then generates misaligned clothing with no knowledge of
+    arm positions, body shape or garment fit.  Passing the original image lets
+    SD treat it as a style-transfer / re-coloring task, producing clothing that
+    stays perfectly fitted to the body.
     """
     if sd_pipe is None:
         raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
@@ -878,22 +884,17 @@ async def text_to_clothes_endpoint(
         clothing_mask = _build_clothing_mask(reference_rgb)  # PIL 'L'
 
         # ── Resize everything to SD's preferred 512×512 ─────────────────────
-        ref_512   = reference_rgb.resize((512, 512), Image.LANCZOS)
-        mask_512  = clothing_mask.resize((512, 512), Image.BILINEAR)
+        ref_512  = reference_rgb.resize((512, 512), Image.LANCZOS)
+        mask_512 = clothing_mask.resize((512, 512), Image.BILINEAR)
 
-        ref_np   = np.array(ref_512).astype(np.float32)
-        mask_np  = np.array(mask_512).astype(np.float32) / 255.0  # 0.0–1.0
-
-        # ── White-prime masked region so SD generates clothing there ─────────
-        white = np.full_like(ref_np, 255.0)
-        primed_np  = ref_np * (1.0 - mask_np[..., None]) + white * mask_np[..., None]
-        primed_img = Image.fromarray(primed_np.astype(np.uint8))
+        ref_np  = np.array(ref_512).astype(np.float32)
+        mask_np = np.array(mask_512).astype(np.float32) / 255.0   # 0.0 – 1.0
 
         # ── Build prompt ─────────────────────────────────────────────────────
         enhanced_prompt = (
             f"fashion photo of a person wearing {prompt}, "
             "high quality, detailed, photorealistic, studio lighting, "
-            "professional fashion photography, sharp focus, clean background"
+            "professional fashion photography, sharp focus"
         )
         negative_prompt = (
             "face changes, different face, distorted face, blurry face, "
@@ -904,17 +905,18 @@ async def text_to_clothes_endpoint(
         print(f"   📝 Prompt: {enhanced_prompt}")
         print(f"   🎚️ Strength: {strength_val}")
 
-        # ── Run img2img on primed image ──────────────────────────────────────
+        # ── img2img on ORIGINAL image — pose/body shape fully preserved ──────
         result = sd_pipe(
             prompt=enhanced_prompt,
             negative_prompt=negative_prompt,
-            image=primed_img,
+            image=ref_512,          # original, not white-primed
             strength=strength_val,
             num_inference_steps=40,
             guidance_scale=7.5,
         ).images[0]
 
         # ── Composite: original outside mask, SD result inside mask ──────────
+        # Face and background pixels come 100 % from the original image.
         result_np  = np.array(result.resize((512, 512), Image.LANCZOS)).astype(np.float32)
         final_np   = ref_np * (1.0 - mask_np[..., None]) + result_np * mask_np[..., None]
         composited = Image.fromarray(final_np.astype(np.uint8))
