@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import API_BASE from '../config.js';
+import API_BASE, { NGROK_HEADERS } from '../config.js';
 import './LivePreviewPane.css';
 
 async function sendToPix2Pix(blob) {
@@ -8,8 +8,9 @@ async function sendToPix2Pix(blob) {
   // rgba=true → backend returns RGBA PNG with real rembg transparency.
   // No brightness-threshold stripping needed, so dark colours have no holes
   // and light colours have no black fringe.
-  const res = await fetch('${API_BASE}/translate-doodle?rgba=true', {
+  const res = await fetch(`${API_BASE}/translate-doodle?rgba=true`, {
     method: 'POST',
+    headers: NGROK_HEADERS,
     body: formData,
   });
   if (!res.ok) throw new Error(`Pix2Pix server error ${res.status}`);

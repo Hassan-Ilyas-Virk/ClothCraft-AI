@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import API_BASE from '../config.js';
+import API_BASE, { NGROK_HEADERS } from '../config.js';
 import './PatternMakerModal.css';
 
 const PatternMakerModal = ({
@@ -225,8 +225,9 @@ const PatternMakerModal = ({
             formData.append('prompt', elementPrompt);
             formData.append('strength', strength.toString());
 
-            const response = await fetch('${API_BASE}/inpaint', {
+            const response = await fetch(`${API_BASE}/inpaint`, {
                 method: 'POST',
+                headers: NGROK_HEADERS,
                 body: formData
             });
 

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Wand2, RotateCcw, Info } from 'lucide-react';
-import API_BASE from '../config.js';
+import API_BASE, { NGROK_HEADERS } from '../config.js';
 import './TextToClothesModal.css';
 
 const COLOR_CHIPS = ['red', 'blue', 'navy', 'black', 'white', 'green', 'yellow', 'purple', 'pink', 'orange', 'grey', 'brown'];
@@ -37,8 +37,9 @@ const TextToClothesModal = ({ referenceLayer, onClose, onApply }) => {
             formData.append('strength', strength.toString());
 
             setStatus('Generating clothing…');
-            const response = await fetch('${API_BASE}/text-to-clothes', {
+            const response = await fetch(`${API_BASE}/text-to-clothes`, {
                 method: 'POST',
+                headers: NGROK_HEADERS,
                 body: formData,
             });
 

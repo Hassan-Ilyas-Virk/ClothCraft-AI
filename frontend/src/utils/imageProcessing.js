@@ -1,4 +1,4 @@
-import API_BASE from '../config.js';
+import API_BASE, { NGROK_HEADERS } from '../config.js';
 
 /**
  * Translate doodle using Pix2Pix model
@@ -10,8 +10,9 @@ export async function translateDoodle(doodleBlob) {
   formData.append('file', doodleBlob, 'doodle.png');
 
   try {
-    const response = await fetch('${API_BASE}/translate-doodle', {
+    const response = await fetch(`${API_BASE}/translate-doodle`, {
       method: 'POST',
+      headers: NGROK_HEADERS,
       body: formData,
     });
 
@@ -256,8 +257,9 @@ export async function inpaintWithStableDiffusion(referenceBlob, maskBlob, prompt
   console.log(`📝 Prompt: "${prompt}"`);
 
   try {
-    const response = await fetch('${API_BASE}/inpaint', {
+    const response = await fetch(`${API_BASE}/inpaint`, {
       method: 'POST',
+      headers: NGROK_HEADERS,
       body: formData,
     });
 
@@ -296,8 +298,9 @@ export async function blendStyles(image1Blob, image2Blob, alpha, outpaint1 = fal
   const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
 
   try {
-    const response = await fetch('${API_BASE}/blend-styles', {
+    const response = await fetch(`${API_BASE}/blend-styles`, {
       method: 'POST',
+      headers: NGROK_HEADERS,
       body: formData,
       signal: controller.signal,
     });
@@ -509,8 +512,9 @@ export async function refinePattern(imageBase64, prompt, strength = 0.6) {
   formData.append('strength', strength.toString());
 
   try {
-    const res = await fetch('${API_BASE}/refine-pattern', {
+    const res = await fetch(`${API_BASE}/refine-pattern`, {
       method: 'POST',
+      headers: NGROK_HEADERS,
       body: formData,
     });
 
@@ -696,8 +700,9 @@ export async function generateHuman(prompt, negativePrompt = '', steps = 50, gui
   const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
   try {
-    const response = await fetch('${API_BASE}/generate-human', {
+    const response = await fetch(`${API_BASE}/generate-human`, {
       method: 'POST',
+      headers: NGROK_HEADERS,
       body: formData,
       signal: controller.signal,
     });
@@ -735,8 +740,9 @@ export async function suggestColors(prompt) {
     console.log(`🎨 Requesting AI color suggestions for: "${prompt}"`);
 
     try {
-        const response = await fetch('${API_BASE}/suggest-colors', {
+        const response = await fetch(`${API_BASE}/suggest-colors`, {
             method: 'POST',
+            headers: NGROK_HEADERS,
             body: formData,
         });
 

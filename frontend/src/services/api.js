@@ -15,6 +15,7 @@ export async function apiRequest(path, options = {}) {
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
+      'ngrok-skip-browser-warning': '1',
       ...(options.headers || {}),
     },
     ...options,
