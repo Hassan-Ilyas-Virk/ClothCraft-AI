@@ -840,93 +840,144 @@ def _build_clothing_mask(reference_rgb: Image.Image) -> Image.Image:
     return mask_img
 
 
+_COLOR_MAP = {
+    # Multi-word first so they match before single-word substrings
+    'sky blue':   (100, 160, 220),
+    'baby blue':  (140, 185, 230),
+    'navy blue':  ( 20,  30, 100),
+    'dark blue':  ( 25,  45, 120),
+    'light blue': (120, 180, 230),
+    'dark green': ( 25,  80,  40),
+    'olive green':( 90, 110,  45),
+    'dark red':   (140,  20,  20),
+    'dark grey':  ( 70,  70,  70),
+    'dark gray':  ( 70,  70,  70),
+    'light grey': (190, 190, 190),
+    'light gray': (190, 190, 190),
+    # Single-word colours
+    'red':        (210,  55,  55),
+    'crimson':    (175,  25,  30),
+    'scarlet':    (195,  45,  30),
+    'blue':       ( 55, 100, 205),
+    'navy':       ( 20,  30, 100),
+    'cobalt':     ( 35,  75, 160),
+    'black':      ( 28,  28,  28),
+    'white':      (242, 242, 242),
+    'cream':      (240, 228, 200),
+    'ivory':      (240, 235, 215),
+    'green':      ( 50, 150,  65),
+    'olive':      ( 95, 115,  45),
+    'emerald':    ( 25, 140,  75),
+    'yellow':     (220, 200,  45),
+    'gold':       (200, 165,  40),
+    'mustard':    (190, 155,  40),
+    'purple':     (115,  45, 180),
+    'violet':     (135,  55, 180),
+    'lavender':   (170, 125, 205),
+    'pink':       (225,  95, 150),
+    'magenta':    (200,  45, 150),
+    'rose':       (210,  75, 130),
+    'orange':     (220, 115,  45),
+    'coral':      (220,  95,  75),
+    'peach':      (225, 158, 125),
+    'brown':      (115,  75,  45),
+    'tan':        (180, 138,  95),
+    'khaki':      (180, 168, 128),
+    'beige':      (212, 190, 158),
+    'camel':      (190, 150,  95),
+    'grey':       (128, 128, 128),
+    'gray':       (128, 128, 128),
+    'silver':     (178, 178, 178),
+    'teal':       ( 45, 148, 148),
+    'cyan':       ( 45, 178, 200),
+    'turquoise':  ( 55, 175, 168),
+    'mint':       (148, 210, 178),
+    'maroon':     (115,  25,  30),
+    'burgundy':   ( 95,  18,  38),
+    'wine':       (100,  20,  40),
+}
+
+def _parse_color_from_prompt(prompt: str):
+    """Return (R, G, B) for the first colour keyword found in *prompt*."""
+    pl = prompt.lower()
+    # Longest match first so 'navy blue' beats 'blue'
+    for name in sorted(_COLOR_MAP, key=len, reverse=True):
+        if name in pl:
+            return _COLOR_MAP[name]
+    return (148, 128, 115)   # warm neutral fallback
+
+
 # Route for Text-to-Clothes generation
 @app.post('/text-to-clothes')
 async def text_to_clothes_endpoint(
     reference: UploadFile = File(...),
     prompt: str = Form(...),
-    strength: str = Form('0.65'),
+    strength: str = Form('0.65'),   # kept for API compat, not used in Pix2Pix path
 ):
-    """Applies a clothing description to a human model image.
+    """Applies a clothing description to a human model using the Pix2Pix model.
 
     Pipeline:
-      1. Build a clothing-region mask (body silhouette minus face, via rembg or
-         geometric fallback).
-      2. Run img2img on the ORIGINAL image (no white-priming) so SD can see the
-         person's pose, body contours and existing garment structure.
-      3. Pixel-perfect composite: original pixels outside the mask (face and
-         background are NEVER changed), SD result only inside the clothing mask.
+      1. Build a clothing-region mask (body silhouette minus face via rembg, or
+         a geometric centre-body rectangle as fallback).
+      2. Parse the dominant colour from the text prompt ("red shirt" → red RGB).
+      3. Create a synthetic doodle: clothing region filled with that colour on a
+         white background — exactly like a user drawing on the canvas.
+      4. Feed the doodle through the existing Pix2Pix model (return_rgba=True)
+         which translates the coloured region into realistic fabric texture and
+         uses rembg to cleanly remove the white background.
+      5. Alpha-composite the RGBA Pix2Pix result on top of the original reference.
 
-    Why no white-priming: filling the clothing area white destroys all pose
-    information.  SD then generates misaligned clothing with no knowledge of
-    arm positions, body shape or garment fit.  Passing the original image lets
-    SD treat it as a style-transfer / re-coloring task, producing clothing that
-    stays perfectly fitted to the body.
+    Why Pix2Pix instead of SD img2img:
+      Pix2Pix was trained specifically on doodle→realistic-clothing pairs and
+      produces fabric that is spatially aligned with its input shape.  SD img2img
+      hallucinates arbitrary scenes regardless of masking strategy.
     """
-    if sd_pipe is None:
-        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
+    if pix2pix_model is None:
+        raise HTTPException(status_code=500, detail="Pix2Pix model not loaded")
 
     start = time.perf_counter()
     print(f"👗 Text-to-Clothes: '{prompt}'")
 
     try:
         reference_bytes = await reference.read()
-        strength_val = max(0.3, min(0.85, float(strength)))
 
         # ── Load reference ───────────────────────────────────────────────────
         original_rgba = Image.open(io.BytesIO(reference_bytes)).convert('RGBA')
         reference_rgb = Image.new("RGB", original_rgba.size, (255, 255, 255))
         reference_rgb.paste(original_rgba, mask=original_rgba.split()[3])
-        original_size = reference_rgb.size
+        w, h = reference_rgb.size   # PIL: (width, height)
 
-        # ── Build clothing mask at original resolution ───────────────────────
+        # ── Build clothing mask ──────────────────────────────────────────────
         print("   🎭 Building clothing mask…")
-        clothing_mask = _build_clothing_mask(reference_rgb)  # PIL 'L'
+        mask_pil = _build_clothing_mask(reference_rgb)          # PIL 'L', (w,h)
+        mask_np  = np.array(mask_pil)                           # (h, w), 0-255
 
-        # ── Resize everything to SD's preferred 512×512 ─────────────────────
-        ref_512  = reference_rgb.resize((512, 512), Image.LANCZOS)
-        mask_512 = clothing_mask.resize((512, 512), Image.BILINEAR)
+        # ── Parse colour from prompt ─────────────────────────────────────────
+        color_rgb = _parse_color_from_prompt(prompt)
+        print(f"   🎨 Colour: {color_rgb}")
 
-        ref_np  = np.array(ref_512).astype(np.float32)
-        mask_np = np.array(mask_512).astype(np.float32) / 255.0   # 0.0 – 1.0
+        # ── Create synthetic doodle (white bg + coloured clothing region) ────
+        # Shape: (h, w, 3) — numpy is row-major: height first
+        doodle_arr = np.full((h, w, 3), 255, dtype=np.uint8)
+        cloth_px   = mask_np > 10
+        doodle_arr[cloth_px] = np.array(color_rgb, dtype=np.uint8)
 
-        # ── Build prompt ─────────────────────────────────────────────────────
-        enhanced_prompt = (
-            f"fashion photo of a person wearing {prompt}, "
-            "high quality, detailed, photorealistic, studio lighting, "
-            "professional fashion photography, sharp focus"
-        )
-        negative_prompt = (
-            "face changes, different face, distorted face, blurry face, "
-            "deformed face, bad anatomy, extra limbs, low quality, blurry, "
-            "watermark, text, logo, background changes"
-        )
+        doodle_img = Image.fromarray(doodle_arr, 'RGB')
+        doodle_io  = io.BytesIO()
+        doodle_img.save(doodle_io, 'PNG')
 
-        print(f"   📝 Prompt: {enhanced_prompt}")
-        print(f"   🎚️ Strength: {strength_val}")
+        # ── Translate via Pix2Pix (returns RGBA, background removed) ─────────
+        print("   🤖 Running Pix2Pix…")
+        p2p_io   = translate_doodle(doodle_io.getvalue(), return_rgba=True)
+        p2p_rgba = Image.open(p2p_io).convert('RGBA')
+        p2p_rgba = p2p_rgba.resize((w, h), Image.LANCZOS)
 
-        # ── img2img on ORIGINAL image — pose/body shape fully preserved ──────
-        result = sd_pipe(
-            prompt=enhanced_prompt,
-            negative_prompt=negative_prompt,
-            image=ref_512,          # original, not white-primed
-            strength=strength_val,
-            num_inference_steps=40,
-            guidance_scale=7.5,
-        ).images[0]
-
-        # ── Composite: original outside mask, SD result inside mask ──────────
-        # Face and background pixels come 100 % from the original image.
-        result_np  = np.array(result.resize((512, 512), Image.LANCZOS)).astype(np.float32)
-        final_np   = ref_np * (1.0 - mask_np[..., None]) + result_np * mask_np[..., None]
-        composited = Image.fromarray(final_np.astype(np.uint8))
-
-        # ── Restore original resolution and alpha ────────────────────────────
-        composited = composited.resize(original_size, Image.LANCZOS).convert('RGBA')
-        composited.putalpha(original_rgba.split()[3])
+        # ── Composite onto original reference ────────────────────────────────
+        result = original_rgba.copy()
+        result.alpha_composite(p2p_rgba)
 
         byte_io = io.BytesIO()
-        composited.save(byte_io, 'PNG')
+        result.save(byte_io, 'PNG')
         byte_io.seek(0)
 
         await log_generation_event(
