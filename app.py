@@ -136,12 +136,14 @@ def create_access_token(user_id: str) -> str:
 
 
 def set_auth_cookie(response: Response, token: str) -> None:
+    # SameSite=none + Secure are required for cross-origin cookie delivery
+    # (e.g. Vercel frontend → ngrok/cloud backend).
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=AUTH_COOKIE_SECURE,
-        samesite="lax",
+        secure=True,
+        samesite="none",
         max_age=JWT_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -151,8 +153,8 @@ def clear_auth_cookie(response: Response) -> None:
     response.delete_cookie(
         key=AUTH_COOKIE_NAME,
         httponly=True,
-        secure=AUTH_COOKIE_SECURE,
-        samesite="lax",
+        secure=True,
+        samesite="none",
         path="/",
     )
 
