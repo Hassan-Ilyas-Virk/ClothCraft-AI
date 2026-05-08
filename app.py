@@ -1,3 +1,11 @@
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
+warnings.filterwarnings("ignore", message=".*_register_pytree_node.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*weights_only.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*CLIPFeatureExtractor.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*text_config_dict.*")
+
 import torch
 import io
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Response, Request, Query

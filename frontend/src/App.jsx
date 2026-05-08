@@ -954,7 +954,7 @@ function App() {
 
                 {/* Center Canvas */}
                 <div className={`app-canvas-area${liveMode && layers.length > 0 ? ' live-mode' : ''}`}>
-                    <div className={liveMode && layers.length > 0 ? 'live-canvas-side' : ''}>
+                    <div className="live-canvas-side">
                         {layers.length > 0 && (
                             <div className="canvas-title-bar glass-panel">
                                 {nameEditing ? (

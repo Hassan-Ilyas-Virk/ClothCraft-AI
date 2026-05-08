@@ -168,11 +168,13 @@ export async function compositeTranslatedDoodleOnReference(referenceBlob, transl
         if (originalAlpha > EDGE_ALPHA_MIN) {
           // Original doodle exists at this location
 
-          // Check if original doodle was black/dark
+          // Check if original doodle was dark (any dark color, not just pure black)
           const origR = doodleData.data[i];
           const origG = doodleData.data[i + 1];
           const origB = doodleData.data[i + 2];
-          const originalWasBlack = origR < 50 && origG < 50 && origB < 50;
+          const originalBrightness = origR * 0.299 + origG * 0.587 + origB * 0.114;
+          // Covers pure black AND dark navy, dark red, dark green, dark purple, etc.
+          const originalWasDark = originalBrightness < 100;
 
           // Get translated pixel
           const transR = translatedData.data[i];
@@ -185,9 +187,9 @@ export async function compositeTranslatedDoodleOnReference(referenceBlob, transl
           const translatedIsDark = brightness < DARK_THRESHOLD;
 
           // Decision logic:
-          // - If original doodle WAS black → keep translated pixel even if black (it's content)
-          // - If original doodle was NOT black → skip black/dark pixels (Pix2Pix artifacts)
-          if ((translatedIsBlack || translatedIsDark) && !originalWasBlack) {
+          // - If original doodle WAS dark (any dark shade) → keep translated pixel even if dark (it's content)
+          // - If original doodle was light → skip dark Pix2Pix pixels (they are background artifacts)
+          if ((translatedIsBlack || translatedIsDark) && !originalWasDark) {
             // This is black/dark background from Pix2Pix, not actual content
             // Skip it (keep reference image)
             blackBackgroundSkipped++;

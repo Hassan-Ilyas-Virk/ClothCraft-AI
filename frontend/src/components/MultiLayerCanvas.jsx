@@ -107,6 +107,7 @@ const MultiLayerCanvas = forwardRef(({
             containerHeight / canvasSize.height
         ) * 0.9;
 
+        if (scale <= 0) return;
         setViewScale(scale);
         setViewOffset({ x: 0, y: 0 });
         pendingAutoFitRef.current = false;
@@ -1569,14 +1570,16 @@ const MultiLayerCanvas = forwardRef(({
             if (containerRef.current) {
                 const containerWidth = containerRef.current.clientWidth;
                 const containerHeight = containerRef.current.clientHeight;
-                
+                if (!containerWidth || !containerHeight) return;
+
                 const scale = Math.min(
                     containerWidth / canvasSize.width,
                     containerHeight / canvasSize.height
-                ) * 0.9; // 90% fit
-                
+                ) * 0.9;
+
+                if (scale <= 0) return;
                 setViewScale(scale);
-                setViewOffset({ x: 0, y: 0 }); // Center/Reset pan
+                setViewOffset({ x: 0, y: 0 });
             }
         },
 
