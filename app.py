@@ -783,17 +783,79 @@ async def refine_stylebend_endpoint(
 latent_cache = {}
 import hashlib
 
+def _build_clothing_mask(reference_rgb: Image.Image) -> Image.Image:
+    """Returns a grayscale mask (L mode) covering the clothing region of a person.
+
+    Strategy:
+      1. Try rembg to get the person silhouette, then zero-out the face band
+         (top 20 % of the person's bounding-box height).
+      2. If rembg is unavailable / fails, fall back to a geometric centre-body
+         rectangle that skips the top 22 % of the image (head) and the bottom
+         5 % (feet / floor), clipped horizontally to the inner 80 %.
+
+    The result is always feathered with a 6 px Gaussian blur so the SD composite
+    blends softly at the boundary.
+    """
+    w, h = reference_rgb.size
+    mask_np = None
+
+    # ── Attempt 1: rembg person silhouette ──────────────────────────────────
+    try:
+        from rembg import remove as rembg_remove
+        img_io = io.BytesIO()
+        reference_rgb.save(img_io, 'PNG')
+        removed_bytes = rembg_remove(img_io.getvalue())
+        person_rgba = Image.open(io.BytesIO(removed_bytes)).convert('RGBA')
+        alpha_arr = np.array(person_rgba.split()[3])           # 0-255
+
+        rows = np.any(alpha_arr > 10, axis=1)
+        cols = np.any(alpha_arr > 10, axis=0)
+        if rows.any() and cols.any():
+            rmin = int(np.where(rows)[0][0])
+            rmax = int(np.where(rows)[0][-1])
+            person_height = rmax - rmin
+
+            # Face band = top 20 % of person height
+            face_bottom = rmin + int(person_height * 0.20)
+
+            silhouette = (alpha_arr > 10).astype(np.uint8) * 255
+            silhouette[:face_bottom, :] = 0   # zero out head / face row
+            mask_np = silhouette
+            print("   ✅ Clothing mask built from rembg silhouette")
+    except Exception as e:
+        print(f"   ⚠️ rembg unavailable for clothing mask ({e}), using geometric fallback")
+
+    # ── Attempt 2: geometric body rectangle ─────────────────────────────────
+    if mask_np is None:
+        top    = int(h * 0.22)   # skip head
+        bottom = int(h * 0.95)   # skip feet
+        left   = int(w * 0.10)
+        right  = int(w * 0.90)
+        mask_np = np.zeros((h, w), dtype=np.uint8)
+        mask_np[top:bottom, left:right] = 255
+        print("   📐 Clothing mask built from geometric fallback")
+
+    mask_img = Image.fromarray(mask_np, mode='L')
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=6))
+    return mask_img
+
+
 # Route for Text-to-Clothes generation
 @app.post('/text-to-clothes')
 async def text_to_clothes_endpoint(
     reference: UploadFile = File(...),
     prompt: str = Form(...),
-    strength: str = Form('0.55'),
+    strength: str = Form('0.65'),
 ):
-    """Regenerates clothing on a human model from a text description.
+    """Applies a clothing description to a human model image.
 
-    Strategy: img2img with a clothing-focused prompt and moderate strength so the
-    face, pose and background are preserved while only the garment changes.
+    Pipeline:
+      1. Build a clothing-region mask (body silhouette minus face, via rembg or
+         geometric fallback).
+      2. White-prime the masked area so SD knows it must generate there.
+      3. Run img2img on the primed image at moderate strength.
+      4. Pixel-perfect composite: original pixels outside the mask, SD result
+         inside — face and background are NEVER changed.
     """
     if sd_pipe is None:
         raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
@@ -805,46 +867,64 @@ async def text_to_clothes_endpoint(
         reference_bytes = await reference.read()
         strength_val = max(0.3, min(0.85, float(strength)))
 
-        # Load reference and composite onto white (handles RGBA reference layers)
+        # ── Load reference ───────────────────────────────────────────────────
         original_rgba = Image.open(io.BytesIO(reference_bytes)).convert('RGBA')
         reference_rgb = Image.new("RGB", original_rgba.size, (255, 255, 255))
         reference_rgb.paste(original_rgba, mask=original_rgba.split()[3])
         original_size = reference_rgb.size
 
-        reference_rgb = reference_rgb.resize((512, 512), Image.LANCZOS)
+        # ── Build clothing mask at original resolution ───────────────────────
+        print("   🎭 Building clothing mask…")
+        clothing_mask = _build_clothing_mask(reference_rgb)  # PIL 'L'
 
-        # Clothing-focused prompt: guide model toward the garment while keeping everything else
+        # ── Resize everything to SD's preferred 512×512 ─────────────────────
+        ref_512   = reference_rgb.resize((512, 512), Image.LANCZOS)
+        mask_512  = clothing_mask.resize((512, 512), Image.BILINEAR)
+
+        ref_np   = np.array(ref_512).astype(np.float32)
+        mask_np  = np.array(mask_512).astype(np.float32) / 255.0  # 0.0–1.0
+
+        # ── White-prime masked region so SD generates clothing there ─────────
+        white = np.full_like(ref_np, 255.0)
+        primed_np  = ref_np * (1.0 - mask_np[..., None]) + white * mask_np[..., None]
+        primed_img = Image.fromarray(primed_np.astype(np.uint8))
+
+        # ── Build prompt ─────────────────────────────────────────────────────
         enhanced_prompt = (
-            f"fashion photo, person wearing {prompt}, "
+            f"fashion photo of a person wearing {prompt}, "
             "high quality, detailed, photorealistic, studio lighting, "
-            "professional fashion photography, full body shot, sharp focus"
+            "professional fashion photography, sharp focus, clean background"
         )
-
-        # Protect face, background and overall composition
         negative_prompt = (
-            "face changes, different face, new face, distorted face, blurry face, "
-            "deformed face, bad anatomy, low quality, blurry, distorted, "
-            "different person, background changes, watermark, text, logo"
+            "face changes, different face, distorted face, blurry face, "
+            "deformed face, bad anatomy, extra limbs, low quality, blurry, "
+            "watermark, text, logo, background changes"
         )
 
-        print(f"📝 Prompt: {enhanced_prompt}")
-        print(f"🎚️ Strength: {strength_val}")
+        print(f"   📝 Prompt: {enhanced_prompt}")
+        print(f"   🎚️ Strength: {strength_val}")
 
+        # ── Run img2img on primed image ──────────────────────────────────────
         result = sd_pipe(
             prompt=enhanced_prompt,
             negative_prompt=negative_prompt,
-            image=reference_rgb,
+            image=primed_img,
             strength=strength_val,
             num_inference_steps=40,
             guidance_scale=7.5,
         ).images[0]
 
-        # Restore original dimensions and alpha channel
-        result = result.resize(original_size, Image.LANCZOS).convert('RGBA')
-        result.putalpha(original_rgba.split()[3])
+        # ── Composite: original outside mask, SD result inside mask ──────────
+        result_np  = np.array(result.resize((512, 512), Image.LANCZOS)).astype(np.float32)
+        final_np   = ref_np * (1.0 - mask_np[..., None]) + result_np * mask_np[..., None]
+        composited = Image.fromarray(final_np.astype(np.uint8))
+
+        # ── Restore original resolution and alpha ────────────────────────────
+        composited = composited.resize(original_size, Image.LANCZOS).convert('RGBA')
+        composited.putalpha(original_rgba.split()[3])
 
         byte_io = io.BytesIO()
-        result.save(byte_io, 'PNG')
+        composited.save(byte_io, 'PNG')
         byte_io.seek(0)
 
         await log_generation_event(
@@ -852,6 +932,7 @@ async def text_to_clothes_endpoint(
             status="success",
             duration_ms=int((time.perf_counter() - start) * 1000),
         )
+        print("   ✅ Text-to-Clothes complete")
         return StreamingResponse(byte_io, media_type='image/png')
 
     except Exception as e:
