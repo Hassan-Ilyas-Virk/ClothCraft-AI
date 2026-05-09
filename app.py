@@ -409,69 +409,14 @@ async def log_generation_event(
 
 
 
-_face_cascades = None
-
-def _get_face_cascades():
-    """Lazy-load frontal + profile Haar cascade detectors (bundled with OpenCV)."""
-    global _face_cascades
-    if _face_cascades is None:
-        base = cv2.data.haarcascades
-        frontal = cv2.CascadeClassifier(base + 'haarcascade_frontalface_default.xml')
-        profile = cv2.CascadeClassifier(base + 'haarcascade_profileface.xml')
-        _face_cascades = (frontal, profile)
-    return _face_cascades
-
-
-def _make_face_mask(rgb_arr):
-    """Return a uint8 mask (255 = face/neck/ear region) using Haar cascade detectors.
-
-    Model-based detection — not fooled by skin-coloured clothing.
-    The bounding boxes are expanded to cover hair, ears, and neck.
-    """
-    h, w = rgb_arr.shape[:2]
-    mask = np.zeros((h, w), dtype=np.uint8)
-
-    gray = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2GRAY)
-    gray = cv2.equalizeHist(gray)
-
-    frontal_cascade, profile_cascade = _get_face_cascades()
-
-    all_faces = []
-    for cascade in (frontal_cascade, profile_cascade):
-        detections = cascade.detectMultiScale(
-            gray, scaleFactor=1.05, minNeighbors=4, minSize=(30, 30)
-        )
-        if len(detections):
-            all_faces.extend(detections.tolist())
-
-    for (fx, fy, fw, fh) in all_faces:
-        # Expand: 40 % upward (hair/forehead), 20 % sideways (ears), 80 % downward (neck)
-        pad_top  = int(fh * 0.40)
-        pad_side = int(fw * 0.20)
-        pad_bot  = int(fh * 0.80)
-        x1 = max(0, fx - pad_side)
-        x2 = min(w, fx + fw + pad_side)
-        y1 = max(0, fy - pad_top)
-        y2 = min(h, fy + fh + pad_bot)
-        mask[y1:y2, x1:x2] = 255
-
-    # Smooth the mask so the transition isn't a hard rectangular cut
-    if mask.max() > 0:
-        mask = cv2.GaussianBlur(mask, (31, 31), 0)
-
-    return mask
-
-
 def extract_doodle_from_image(img_bytes, num_colors=6):
-    """Extract a flat, posterized doodle of ONLY the clothing in an image.
+    """Convert a clothing/fashion image into an editable flat-color doodle.
 
     Pipeline:
-      1. rembg  — remove the background, keep person + clothes.
-      2. Skin mask — detect skin/face/neck/hands via HSV and zero those pixels out,
-                     leaving only fabric.
-      3. Smooth — bilateral + median blur to flatten fabric texture and wrinkles.
-      4. K-means quantization — reduce remaining clothing pixels to N flat colors.
-      5. Output RGBA PNG with transparent BG and non-clothing areas.
+      1. rembg  — strip the scene background, keep the full subject (person + clothes).
+      2. Smooth — bilateral + median blur to flatten fabric texture and wrinkles.
+      3. K-means quantization — reduce to N flat colors (default 6).
+      4. Output RGBA PNG; background is fully transparent.
     """
     pil_in = Image.open(io.BytesIO(img_bytes)).convert('RGB')
     rgb = np.array(pil_in)
@@ -486,31 +431,25 @@ def extract_doodle_from_image(img_bytes, num_colors=6):
             cut_pil = cut_pil.resize((w, h), Image.LANCZOS)
         cut_arr = np.array(cut_pil)
         alpha = cut_arr[:, :, 3].copy()
-        # Retrieve the cleaned-up RGB from rembg output (same pixels, better than raw)
-        rgb = cut_arr[:, :, :3]
+        rgb   = cut_arr[:, :, :3]
     except Exception as e:
         print(f"   ⚠️ rembg unavailable ({e}) — using brightness fallback.")
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        gray  = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         alpha = np.where(gray < 245, 255, 0).astype(np.uint8)
 
-    # ── 2. Erase face / neck / hair using Haar cascade (model-based) ─────
-    face_mask = _make_face_mask(rgb)
-    # Blend: where face_mask is strong, set alpha to 0
-    alpha = (alpha.astype(np.float32) * (1.0 - face_mask.astype(np.float32) / 255.0)).astype(np.uint8)
-
-    # ── 3. Smooth to flatten wrinkles/texture ─────────────────────────────
+    # ── 2. Smooth to flatten texture / wrinkles ───────────────────────────
     smooth = cv2.bilateralFilter(rgb, 9, 80, 80)
     smooth = cv2.medianBlur(smooth, 5)
 
-    # ── 4. K-means quantization on clothing pixels only ───────────────────
+    # ── 3. K-means color quantization on foreground pixels ────────────────
     n_colors = max(2, min(int(num_colors), 16))
-    fg_mask = alpha > 32
+    fg_mask  = alpha > 32
 
     if fg_mask.sum() < n_colors:
         out_rgba = np.zeros((h, w, 4), dtype=np.uint8)
     else:
         fg_pixels = smooth[fg_mask].reshape(-1, 3).astype(np.float32)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 12, 1.0)
+        criteria  = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 12, 1.0)
         _, labels, centers = cv2.kmeans(
             fg_pixels, n_colors, None, criteria, 3, cv2.KMEANS_PP_CENTERS
         )
