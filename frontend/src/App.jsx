@@ -24,7 +24,8 @@ import {
     createMaskFromDoodle,
     compositeTranslatedDoodleOnReference,
     inpaintWithStableDiffusion,
-    refinePattern
+    refinePattern,
+    extractDoodle
 } from './utils/imageProcessing';
 
 function App() {
@@ -891,6 +892,48 @@ function App() {
         setShowStylebend(true);
     };
 
+    // Convert reference clothing image into an editable doodle on a NEW drawing layer.
+    const handleExtractDoodle = async (refLayer) => {
+        try {
+            if (!refLayer) return;
+
+            // Source the highest-quality bytes available for the reference layer.
+            let srcBlob = null;
+            if (canvasRef.current?.getLayerBlob) {
+                srcBlob = await canvasRef.current.getLayerBlob(refLayer.id);
+            }
+            if (!srcBlob) {
+                const srcUrl = refLayer.canvasData || refLayer.thumbnail;
+                if (!srcUrl) {
+                    setError('Reference layer has no image to convert.');
+                    return;
+                }
+                const res = await fetch(srcUrl);
+                srcBlob = await res.blob();
+            }
+
+            const doodleBlob = await extractDoodle(srcBlob, 6);
+            const newLayer = addLayer('drawing', `${refLayer.name || 'Reference'} Doodle`);
+
+            // Wait for the new layer's canvas to mount, then paint the doodle onto it
+            // so the user can immediately brush-edit on top.
+            setTimeout(async () => {
+                if (canvasRef.current?.loadImageToLayer) {
+                    await canvasRef.current.loadImageToLayer(newLayer.id, doodleBlob, false);
+                }
+                const objUrl = URL.createObjectURL(doodleBlob);
+                updateLayer(newLayer.id, {
+                    canvasData: objUrl,
+                    thumbnail: objUrl,
+                });
+                setActiveLayerId(newLayer.id);
+            }, 60);
+        } catch (err) {
+            console.error('Error extracting doodle:', err);
+            setError(err.message || 'Failed to convert reference to doodle');
+        }
+    };
+
     const handleApplyTextToClothes = async (resultUrl) => {
         try {
             const res = await fetch(resultUrl);
@@ -1103,6 +1146,7 @@ function App() {
                         onStylebendFromLayer={handleStylebendFromLayer}
                         onGenerateHuman={() => setShowGenerateHuman(true)}
                         onTextToClothes={() => setShowTextToClothes(true)}
+                        onExtractDoodle={handleExtractDoodle}
                     />
                 )}
             </div >
