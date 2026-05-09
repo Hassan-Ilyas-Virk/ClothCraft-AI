@@ -5,10 +5,10 @@ import API_BASE, { NGROK_HEADERS } from '../config.js';
  * Background and non-garment areas are removed; output is RGBA PNG with a few
  * flat colors so it looks like the input pix2pix expects on the way back.
  * @param {Blob} imageBlob
- * @param {number} numColors - 2-16 flat colors in the output (default 6)
+ * @param {number} numColors - 2-16 flat colors in the output (default 3)
  * @returns {Promise<Blob>}
  */
-export async function extractDoodle(imageBlob, numColors = 6) {
+export async function extractDoodle(imageBlob, numColors = 3) {
   const formData = new FormData();
   formData.append('file', imageBlob, 'reference.png');
 

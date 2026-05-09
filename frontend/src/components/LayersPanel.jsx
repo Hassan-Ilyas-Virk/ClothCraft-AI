@@ -21,6 +21,7 @@ const LayersPanel = ({
     onGenerateHuman,
     onTextToClothes,
     onExtractDoodle,
+    onMergeDown,
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
     const [draggedLayerId, setDraggedLayerId] = useState(null);
@@ -207,6 +208,11 @@ const LayersPanel = ({
                                         onDelete={onDeleteLayer}
                                         onClothify={onClothify}
                                         onPatternMaker={onPatternMaker}
+                                        onMergeDown={onMergeDown}
+                                        canMergeDown={(() => {
+                                            const layerIdx = layers.findIndex(l => l.id === layer.id);
+                                            return layerIdx > 0 && layers[layerIdx - 1]?.type === 'drawing';
+                                        })()}
                                     />
                                 </React.Fragment>
                             );

@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette, Wand2, PenLine } from 'lucide-react';
+import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette, Wand2, PenLine, ArrowDownToLine } from 'lucide-react';
 import './LayersPanel.css';
 
 const LayerItem = ({
@@ -21,6 +21,8 @@ const LayerItem = ({
     onStylebend,
     onTextToClothes,
     onExtractDoodle,
+    onMergeDown,
+    canMergeDown,
 }) => {
     const [showContextMenu, setShowContextMenu] = useState(false);
     const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
@@ -262,6 +264,17 @@ const LayerItem = ({
                             }}>
                                 <Grid3x3 size={16} /> Pattern Maker
                             </div>
+                            {canMergeDown && (
+                                <>
+                                    <div className="layer-context-menu-divider" />
+                                    <div className="layer-context-menu-item" onClick={() => {
+                                        setShowContextMenu(false);
+                                        onMergeDown && onMergeDown(layer.id);
+                                    }}>
+                                        <ArrowDownToLine size={16} /> Merge Down
+                                    </div>
+                                </>
+                            )}
                             <div className="layer-context-menu-divider" />
                             <div className="layer-context-menu-item" onClick={handleDelete}>
                                 <Trash2 size={16} /> Delete

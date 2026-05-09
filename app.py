@@ -489,7 +489,7 @@ def _erase_body_parts(rgb_arr, alpha):
         return alpha
 
 
-def extract_doodle_from_image(img_bytes, num_colors=6):
+def extract_doodle_from_image(img_bytes, num_colors=3):
     """Convert a clothing/fashion image into an editable flat-color doodle.
 
     Pipeline:
@@ -797,7 +797,7 @@ async def translate_doodle_endpoint(
 @app.post('/extract-doodle')
 async def extract_doodle_endpoint(
     file: UploadFile = File(...),
-    num_colors: int = Query(6, description="Number of flat colors in the quantized output (2-16)"),
+    num_colors: int = Query(3, description="Number of flat colors in the quantized output (2-16)"),
 ):
     """Convert a clothing image into an editable flat-color 'doodle' (clothing only).
 

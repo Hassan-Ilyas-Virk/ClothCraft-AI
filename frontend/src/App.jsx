@@ -925,7 +925,7 @@ function App() {
                 srcBlob = await res.blob();
             }
 
-            const doodleBlob = await extractDoodle(srcBlob, 6);
+            const doodleBlob = await extractDoodle(srcBlob, 3);
             const newLayer = addLayer('drawing', `${refLayer.name || 'Reference'} Doodle`);
 
             // Wait for the new layer's canvas to mount, then paint the doodle onto it
@@ -945,6 +945,62 @@ function App() {
             console.error('Error extracting doodle:', err);
             setError(err.message || 'Failed to convert reference to doodle');
         }
+    };
+
+    const handleMergeDown = (layerId) => {
+        const idx = layers.findIndex(l => l.id === layerId);
+        if (idx <= 0) return;
+        const upper = layers[idx];
+        const lower = layers[idx - 1];
+        if (!lower || lower.type !== 'drawing') return;
+
+        const { width, height } = canvasRef.current?.getCanvasSize?.() || { width: 1024, height: 1024 };
+        const temp = document.createElement('canvas');
+        temp.width = width;
+        temp.height = height;
+        const ctx = temp.getContext('2d');
+
+        const drawLayer = ({ canvasData, opacity = 1, blendMode = 'source-over' }) =>
+            new Promise(resolve => {
+                if (!canvasData) { resolve(); return; }
+                const img = new Image();
+                img.onload = () => {
+                    ctx.save();
+                    ctx.globalAlpha = opacity;
+                    ctx.globalCompositeOperation = blendMode;
+                    ctx.drawImage(img, 0, 0);
+                    ctx.restore();
+                    resolve();
+                };
+                img.src = canvasData;
+            });
+
+        drawLayer({ canvasData: lower.canvasData, opacity: lower.opacity ?? 1, blendMode: 'source-over' })
+            .then(() => drawLayer({ canvasData: upper.canvasData, opacity: upper.opacity ?? 1, blendMode: upper.blendMode || 'source-over' }))
+            .then(() => {
+                const mergedData = temp.toDataURL('image/png');
+
+                // Generate thumbnail
+                const SZ = 480;
+                const thumbCanvas = document.createElement('canvas');
+                thumbCanvas.width = SZ;
+                thumbCanvas.height = SZ;
+                const tCtx = thumbCanvas.getContext('2d');
+                const thumbImg = new Image();
+                thumbImg.onload = () => {
+                    const scale = Math.min(SZ / width, SZ / height);
+                    tCtx.drawImage(thumbImg, (SZ - scale * width) / 2, (SZ - scale * height) / 2, width * scale, height * scale);
+                    updateLayer(lower.id, {
+                        canvasData: mergedData,
+                        thumbnail: thumbCanvas.toDataURL('image/png'),
+                        opacity: 1,
+                        blendMode: 'source-over',
+                    });
+                    removeLayer(layerId);
+                    setActiveLayerId(lower.id);
+                };
+                thumbImg.src = mergedData;
+            });
     };
 
     const handleApplyTextToClothes = async (resultUrl) => {
@@ -1169,6 +1225,7 @@ function App() {
                         onGenerateHuman={() => setShowGenerateHuman(true)}
                         onTextToClothes={() => setShowTextToClothes(true)}
                         onExtractDoodle={handleExtractDoodle}
+                        onMergeDown={handleMergeDown}
                     />
                 )}
             </div >
