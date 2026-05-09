@@ -33,6 +33,7 @@ yarn-error.log*
 # Build
 frontend/dist/
 frontend/build/
+frontend/.vite/
 
 # IDE
 .vscode/
@@ -64,6 +65,9 @@ model/*.pkl
 
 # Debug and temporary files
 debug_imports.py
+scratch/
+server.log
+server_err.log
 
 # rembg AI model cache (downloaded automatically at runtime)
 u2net/
