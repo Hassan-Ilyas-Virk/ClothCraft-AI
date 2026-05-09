@@ -1,3 +1,9 @@
+import os
+# Suppress ONNX Runtime's CUDA-DLL-not-found noise.  rembg uses ORT and tries
+# the CUDA provider first even when only CPU is available, producing a loud
+# but harmless error.  Setting this before any ORT import silences it.
+os.environ.setdefault("ORT_LOGGING_LEVEL", "4")   # 4 = FATAL only
+
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
 warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
@@ -46,6 +52,22 @@ if stylebend_path not in sys.path:
 from scripts.inversion import load_model, project_image, resolve_device
 from scripts.blending import blend_latents
 
+# ── Shared CPU-only rembg session ────────────────────────────────────────────
+# Explicitly requesting CPUExecutionProvider prevents ORT from even attempting
+# to load the CUDA DLL, which would otherwise log a loud error on machines that
+# have onnxruntime-gpu installed but no matching CUDA toolkit.
+_rembg_session = None
+def get_rembg_session():
+    global _rembg_session
+    if _rembg_session is None:
+        from rembg import new_session
+        _rembg_session = new_session("u2net", providers=["CPUExecutionProvider"])
+    return _rembg_session
+
+def rembg_remove_cpu(data):
+    from rembg import remove as _remove
+    return _remove(data, session=get_rembg_session())
+# ─────────────────────────────────────────────────────────────────────────────
 
 MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI") or "mongodb://127.0.0.1:27017"
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME") or os.getenv("MONGO_DB_NAME") or "clothcraft_ai"
@@ -409,14 +431,73 @@ async def log_generation_event(
 
 
 
+# ── Clothing/body parsing model (SegFormer fine-tuned on ATR dataset) ──────
+# Labels:
+#   0 Background, 1 Hat, 2 Hair, 3 Sunglasses, 4 Upper-clothes, 5 Skirt,
+#   6 Pants, 7 Dress, 8 Belt, 9 Left-shoe, 10 Right-shoe, 11 Face,
+#   12 Left-leg, 13 Right-leg, 14 Left-arm, 15 Right-arm, 16 Bag, 17 Scarf
+_BODY_PART_LABELS = {2, 11, 12, 13, 14, 15}  # Hair, Face, legs, arms
+
+_clothes_seg = None
+def _get_clothes_segmenter():
+    """Lazy-load the SegFormer clothing segmentation model (cached)."""
+    global _clothes_seg
+    if _clothes_seg is None:
+        from transformers import SegformerImageProcessor, AutoModelForSemanticSegmentation
+        print("   ⚙️  Loading clothing segmentation model (mattmdjaga/segformer_b2_clothes)...")
+        processor = SegformerImageProcessor.from_pretrained("mattmdjaga/segformer_b2_clothes")
+        model     = AutoModelForSemanticSegmentation.from_pretrained("mattmdjaga/segformer_b2_clothes")
+        model.eval()
+        _clothes_seg = (processor, model)
+    return _clothes_seg
+
+
+def _erase_body_parts(rgb_arr, alpha):
+    """Pixel-accurate body-part erasure using SegFormer clothing parser.
+
+    Per-pixel labels for face, hair, arms, legs are zeroed in alpha — clothing
+    pixels survive untouched. No rectangles, no color heuristics.
+    """
+    try:
+        processor, model = _get_clothes_segmenter()
+        h, w = rgb_arr.shape[:2]
+
+        pil_rgb = Image.fromarray(rgb_arr)
+        with torch.no_grad():
+            inputs  = processor(images=pil_rgb, return_tensors="pt")
+            logits  = model(**inputs).logits  # [1, num_labels, h_logits, w_logits]
+            up      = torch.nn.functional.interpolate(
+                logits, size=(h, w), mode="bilinear", align_corners=False
+            )
+            pred    = up.argmax(dim=1)[0].cpu().numpy()  # (h, w) int
+
+        # Build a body-parts mask (True where pixel is face/hair/arms/legs)
+        body_mask = np.isin(pred, list(_BODY_PART_LABELS))
+
+        # Light dilation so we also catch the 1–2 px boundary between
+        # skin and clothing (e.g. collar/cuff edges).
+        body_u8 = body_mask.astype(np.uint8) * 255
+        body_u8 = cv2.dilate(body_u8, np.ones((5, 5), np.uint8), iterations=1)
+        # Soft feather so the cut isn't pixel-sharp.
+        body_u8 = cv2.GaussianBlur(body_u8, (11, 11), 0)
+
+        erase_weight = body_u8.astype(np.float32) / 255.0
+        return (alpha.astype(np.float32) * (1.0 - erase_weight)).astype(np.uint8)
+
+    except Exception as e:
+        print(f"   ⚠️ Body-part erasure failed ({e}) — skipping.")
+        return alpha
+
+
 def extract_doodle_from_image(img_bytes, num_colors=6):
     """Convert a clothing/fashion image into an editable flat-color doodle.
 
     Pipeline:
-      1. rembg  — strip the scene background, keep the full subject (person + clothes).
-      2. Smooth — bilateral + median blur to flatten fabric texture and wrinkles.
-      3. K-means quantization — reduce to N flat colors (default 6).
-      4. Output RGBA PNG; background is fully transparent.
+      1. rembg          — strip scene background, keep full subject.
+      2. SegFormer      — per-pixel parse: erase face / hair / arms / legs.
+      3. Smooth         — bilateral + median blur to flatten texture and wrinkles.
+      4. K-means        — reduce to N flat colors (default 6).
+      5. Output         — RGBA PNG with transparent background.
     """
     pil_in = Image.open(io.BytesIO(img_bytes)).convert('RGB')
     rgb = np.array(pil_in)
@@ -424,8 +505,7 @@ def extract_doodle_from_image(img_bytes, num_colors=6):
 
     # ── 1. Remove scene background ────────────────────────────────────────
     try:
-        from rembg import remove as rembg_remove
-        cut_bytes = rembg_remove(img_bytes)
+        cut_bytes = rembg_remove_cpu(img_bytes)
         cut_pil = Image.open(io.BytesIO(cut_bytes)).convert('RGBA')
         if cut_pil.size != (w, h):
             cut_pil = cut_pil.resize((w, h), Image.LANCZOS)
@@ -437,11 +517,14 @@ def extract_doodle_from_image(img_bytes, num_colors=6):
         gray  = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         alpha = np.where(gray < 245, 255, 0).astype(np.uint8)
 
-    # ── 2. Smooth to flatten texture / wrinkles ───────────────────────────
+    # ── 2. Erase face / hair / arms / legs (per-pixel SegFormer clothing parser) ──
+    alpha = _erase_body_parts(rgb, alpha)
+
+    # ── 3. Smooth to flatten texture / wrinkles ───────────────────────────
     smooth = cv2.bilateralFilter(rgb, 9, 80, 80)
     smooth = cv2.medianBlur(smooth, 5)
 
-    # ── 3. K-means color quantization on foreground pixels ────────────────
+    # ── 4. K-means color quantization on remaining foreground pixels ──────
     n_colors = max(2, min(int(num_colors), 16))
     fg_mask  = alpha > 32
 
@@ -505,12 +588,11 @@ def translate_doodle(doodle_bytes, return_rgba=False, fast=False):
         return byte_io
 
     try:
-        from rembg import remove as rembg_remove
         print("   🪄 Removing Pix2Pix background using rembg...")
 
         temp_io = io.BytesIO()
         output_image.save(temp_io, format="PNG")
-        result_bytes = rembg_remove(temp_io.getvalue())
+        result_bytes = rembg_remove_cpu(temp_io.getvalue())
         output_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
 
         if return_rgba:
@@ -635,12 +717,11 @@ def outpaint_to_full_body(img_pil):
     # which has clean white backgrounds
     # ---------------------------------------------------------------
     try:
-        from rembg import remove as rembg_remove
         print("   🪄 Removing background using rembg...")
         img_bytes_io = io.BytesIO()
         img_pil.save(img_bytes_io, format="PNG")
         img_bytes_val = img_bytes_io.getvalue()
-        result_bytes = rembg_remove(img_bytes_val)
+        result_bytes = rembg_remove_cpu(img_bytes_val)
         img_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
 
         # Place the cutout (alpha-composited) on a pure WHITE background
@@ -904,59 +985,258 @@ async def refine_stylebend_endpoint(
 latent_cache = {}
 import hashlib
 
-def _build_clothing_mask(reference_rgb: Image.Image) -> Image.Image:
-    """Returns a grayscale mask (L mode) covering the clothing region of a person.
+# ─── Garment-keyword → SegFormer label IDs ──────────────────────────────────
+# SegFormer labels (mattmdjaga/segformer_b2_clothes):
+#   0 Background  1 Hat       2 Hair      3 Sunglasses 4 Upper-clothes
+#   5 Skirt       6 Pants     7 Dress     8 Belt       9 Left-shoe
+#  10 Right-shoe 11 Face     12 L-leg    13 R-leg     14 L-arm
+#  15 R-arm     16 Bag      17 Scarf
+# Multi-word entries are listed first so substring matching picks them before
+# their single-word components.
+GARMENT_LABEL_MAP = [
+    ('crop top',   {4}),
+    ('tank top',   {4}),
+    ('button up',  {4}),
+    ('button-up',  {4}),
+    ('t-shirt',    {4}),
+    ('tshirt',     {4}),
+    ('shirt',      {4}),
+    ('blouse',     {4}),
+    ('sweatshirt', {4}),
+    ('sweater',    {4}),
+    ('hoodie',     {4}),
+    ('jacket',     {4}),
+    ('blazer',     {4}),
+    ('cardigan',   {4}),
+    ('pullover',   {4}),
+    ('jumper',     {4}),
+    ('coat',       {4}),
+    ('vest',       {4}),
+    ('tee',        {4}),
+    ('top',        {4}),
 
-    Strategy:
-      1. Try rembg to get the person silhouette, then zero-out the face+neck
-         band (top 38 % of the person's bounding-box height).
-      2. If rembg is unavailable / fails, fall back to a geometric centre-body
-         rectangle that skips the top 38 % of the image and the bottom 5 %.
+    # Full-body garments — replace upper + lower regions
+    ('dress',      {4, 5, 6, 7}),
+    ('gown',       {4, 5, 6, 7}),
+    ('frock',      {4, 5, 6, 7}),
+    ('robe',       {4, 5, 6, 7}),
+    ('jumpsuit',   {4, 5, 6, 7}),
+    ('overall',    {4, 5, 6, 7}),
 
-    Applies Gaussian blur for soft compositing edges, then hard-zeros everything
-    above the cutoff row so blur doesn't bleed back into the face area.
+    # Lower body
+    ('jeans',      {6}),
+    ('trousers',   {6}),
+    ('chinos',     {6}),
+    ('slacks',     {6}),
+    ('leggings',   {6}),
+    ('joggers',    {6}),
+    ('sweatpants', {6}),
+    ('shorts',     {6}),
+    ('pants',      {6}),
+    ('skirt',      {5}),
+
+    # Two-piece
+    ('suit',       {4, 6}),
+
+    # Headwear
+    ('beanie',     {1}),
+    ('cap',        {1}),
+    ('hat',        {1}),
+
+    ('scarf',      {17}),
+    ('belt',       {8}),
+]
+
+
+def _detect_garment_labels(prompt: str):
+    """Match garment keywords in prompt → set of SegFormer label IDs."""
+    p = prompt.lower()
+    matched = set()
+    for keyword, labels in GARMENT_LABEL_MAP:
+        if keyword in p:
+            matched.update(labels)
+    if not matched:
+        matched = {4}   # default: replace upper-clothes
+    return matched
+
+
+# The natural BODY REGION a garment should occupy, regardless of what's currently
+# in the reference image. e.g. "trousers" should cover the full legs even if the
+# model is wearing shorts. We build the mask over this region (not just existing
+# garment pixels) and then pre-paint it with the requested colour so SD has a
+# strong colour+shape signal to work from.
+#   Labels: 4 Upper-clothes  5 Skirt  6 Pants  7 Dress
+#          12 L-leg  13 R-leg  14 L-arm  15 R-arm
+GARMENT_REGION_MAP = [
+    # Long lower-body → full legs
+    ('jeans',       {6, 12, 13}),
+    ('trousers',    {6, 12, 13}),
+    ('chinos',      {6, 12, 13}),
+    ('slacks',      {6, 12, 13}),
+    ('leggings',    {6, 12, 13}),
+    ('joggers',     {6, 12, 13}),
+    ('sweatpants',  {6, 12, 13}),
+    ('pants',       {6, 12, 13}),
+
+    # Long upper-body with sleeves → torso + arms
+    ('long sleeve', {4, 14, 15}),
+    ('long-sleeve', {4, 14, 15}),
+    ('hoodie',      {4, 14, 15}),
+    ('sweatshirt',  {4, 14, 15}),
+    ('sweater',     {4, 14, 15}),
+    ('cardigan',    {4, 14, 15}),
+    ('jacket',      {4, 14, 15}),
+    ('blazer',      {4, 14, 15}),
+    ('coat',        {4, 14, 15}),
+
+    # Skirt → skirt region + legs (so it can extend below)
+    ('skirt',       {5, 12, 13}),
+
+    # Full-body → torso + legs
+    ('jumpsuit',    {4, 5, 6, 7, 12, 13}),
+    ('overall',     {4, 5, 6, 7, 12, 13}),
+    ('dress',       {4, 5, 6, 7, 12, 13}),
+    ('gown',        {4, 5, 6, 7, 12, 13}),
+    ('frock',       {4, 5, 6, 7, 12, 13}),
+    ('robe',        {4, 5, 6, 7, 12, 13}),
+
+    # Two-piece → upper + legs + arms
+    ('suit',        {4, 6, 12, 13, 14, 15}),
+]
+
+
+def _detect_garment_region(prompt: str):
+    """Return the natural body-region labels the requested garment should cover,
+    or None if the garment doesn't need region extension (e.g. short-sleeve
+    shirts, shorts — those stay limited to existing garment pixels)."""
+    p = prompt.lower()
+    for keyword, labels in GARMENT_REGION_MAP:
+        if keyword in p:
+            return set(labels)
+    return None
+
+
+def _color_prefill(image_pil: Image.Image, mask_pil: Image.Image, color_rgb) -> Image.Image:
+    """Paint the masked region of *image_pil* with *color_rgb* and a touch of
+    brightness noise so SD treats it as fabric, not a flat slab. Outside the
+    mask is unchanged."""
+    img = np.array(image_pil.convert('RGB')).astype(np.float32)
+    msk = np.array(mask_pil.convert('L')).astype(np.float32) / 255.0
+    color_arr = np.array(color_rgb, dtype=np.float32).reshape(1, 1, 3)
+
+    h, w = img.shape[:2]
+    noise = (np.random.rand(h, w, 1).astype(np.float32) - 0.5) * 12.0
+    painted = np.clip(color_arr + noise, 0, 255)
+
+    out = img * (1.0 - msk[..., None]) + painted * msk[..., None]
+    return Image.fromarray(out.astype(np.uint8))
+
+
+def _build_garment_mask(reference_rgb: Image.Image, label_ids) -> Image.Image:
+    """Pixel-accurate mask of the requested garment regions, returned as PIL 'L'."""
+    arr = np.array(reference_rgb)
+    h, w = arr.shape[:2]
+
+    processor, model = _get_clothes_segmenter()
+    pil = Image.fromarray(arr)
+    with torch.no_grad():
+        inputs = processor(images=pil, return_tensors="pt")
+        logits = model(**inputs).logits
+        up = torch.nn.functional.interpolate(
+            logits, size=(h, w), mode="bilinear", align_corners=False
+        )
+        pred = up.argmax(dim=1)[0].cpu().numpy()
+
+    mask_u8 = np.isin(pred, list(label_ids)).astype(np.uint8) * 255
+
+    # Slight dilate then feather so SD has a few pixels of margin to blend.
+    mask_u8 = cv2.dilate(mask_u8, np.ones((5, 5), np.uint8), iterations=2)
+    mask_u8 = cv2.GaussianBlur(mask_u8, (15, 15), 0)
+    return Image.fromarray(mask_u8, mode='L')
+
+
+def _masked_latent_inpaint(
+    image_pil: Image.Image,
+    mask_pil:  Image.Image,
+    prompt: str,
+    negative_prompt: str,
+    strength: float = 0.95,
+    num_steps: int = 30,
+    guidance: float = 7.5,
+) -> Image.Image:
+    """Real masked-latent inpainting using the standard 4-channel SD img2img model.
+
+    At every denoising step:
+      • Inside  the mask → keep the model's denoised latent (the new garment).
+      • Outside the mask → re-blend the original latent renoised to this step
+        (so face/body/background converge back to the source image).
+
+    This gives true inpainting behaviour without requiring a 9-channel inpaint
+    checkpoint — the only thing we change in the final image is what's masked.
     """
-    w, h = reference_rgb.size
-    mask_np = None
-    cutoff_row = 0   # first row of the clothing region
+    pipe   = sd_pipe
+    device = pipe.device
+    dtype  = pipe.unet.dtype
 
-    # ── Attempt 1: rembg person silhouette ──────────────────────────────────
-    try:
-        from rembg import remove as rembg_remove
-        img_io = io.BytesIO()
-        reference_rgb.save(img_io, 'PNG')
-        removed_bytes = rembg_remove(img_io.getvalue())
-        person_rgba = Image.open(io.BytesIO(removed_bytes)).convert('RGBA')
-        alpha_arr = np.array(person_rgba.split()[3])           # 0-255
+    # ── Encode original image to latents ───────────────────────────────────
+    img_np = np.array(image_pil.convert('RGB')).astype(np.float32) / 255.0
+    img_t  = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(device, dtype)
+    img_t  = 2.0 * img_t - 1.0
+    with torch.no_grad():
+        init_latents = pipe.vae.encode(img_t).latent_dist.sample() * pipe.vae.config.scaling_factor
 
-        rows = np.any(alpha_arr > 10, axis=1)
-        if rows.any():
-            rmin = int(np.where(rows)[0][0])
-            rmax = int(np.where(rows)[0][-1])
-            person_height = rmax - rmin
+    # ── Build latent-resolution mask (1/8 of image) ────────────────────────
+    h_lat, w_lat = init_latents.shape[-2:]
+    mask_np = np.array(mask_pil.convert('L')).astype(np.float32) / 255.0
+    mask_lat = cv2.resize(mask_np, (w_lat, h_lat), interpolation=cv2.INTER_LINEAR)
+    mask_t = torch.from_numpy(mask_lat).unsqueeze(0).unsqueeze(0).to(device, dtype)
 
-            # Face band = top 20 % of person height
-            cutoff_row = rmin + int(person_height * 0.20)
-            silhouette = (alpha_arr > 10).astype(np.uint8) * 255
-            silhouette[:cutoff_row, :] = 0
-            mask_np = silhouette
-            print(f"   ✅ Clothing mask: rembg silhouette, cutoff row {cutoff_row}")
-    except Exception as e:
-        print(f"   ⚠️ rembg unavailable ({e}), using geometric fallback")
+    # ── Encode prompts (CFG) ───────────────────────────────────────────────
+    tok = pipe.tokenizer
+    pos = tok([prompt],          padding="max_length", max_length=tok.model_max_length,
+              truncation=True, return_tensors="pt").input_ids.to(device)
+    neg = tok([negative_prompt], padding="max_length", max_length=tok.model_max_length,
+              truncation=True, return_tensors="pt").input_ids.to(device)
+    with torch.no_grad():
+        pos_emb = pipe.text_encoder(pos)[0]
+        neg_emb = pipe.text_encoder(neg)[0]
+    cond_emb = torch.cat([neg_emb, pos_emb])
 
-    # ── Attempt 2: geometric body rectangle ─────────────────────────────────
-    if mask_np is None:
-        cutoff_row = int(h * 0.22)
-        mask_np = np.zeros((h, w), dtype=np.uint8)
-        mask_np[cutoff_row:int(h * 0.95), int(w * 0.10):int(w * 0.90)] = 255
-        print(f"   📐 Clothing mask: geometric fallback, cutoff row {cutoff_row}")
+    # ── Setup scheduler with strength offset ───────────────────────────────
+    pipe.scheduler.set_timesteps(num_steps, device=device)
+    all_t   = pipe.scheduler.timesteps
+    init_idx = max(0, int(num_steps * (1.0 - strength)))
+    timesteps = all_t[init_idx:]
 
-    # Feather with blur, then hard-zero above the cutoff to stop bleed
-    mask_img = Image.fromarray(mask_np, mode='L')
-    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=8))
-    mask_arr = np.array(mask_img)
-    mask_arr[:cutoff_row, :] = 0
-    return Image.fromarray(mask_arr, mode='L')
+    noise = torch.randn_like(init_latents)
+    latents = pipe.scheduler.add_noise(init_latents, noise, timesteps[:1])
+
+    # ── Denoising loop with mask blending ──────────────────────────────────
+    for i, t in enumerate(timesteps):
+        with torch.no_grad():
+            inp = torch.cat([latents, latents])
+            inp = pipe.scheduler.scale_model_input(inp, t)
+            noise_pred = pipe.unet(inp, t, encoder_hidden_states=cond_emb).sample
+
+        n_uncond, n_text = noise_pred.chunk(2)
+        noise_pred = n_uncond + guidance * (n_text - n_uncond)
+
+        latents = pipe.scheduler.step(noise_pred, t, latents).prev_sample
+
+        # Renoise the original to the *next* timestep, then blend.
+        if i + 1 < len(timesteps):
+            t_next = timesteps[i + 1].unsqueeze(0)
+            noisy_orig = pipe.scheduler.add_noise(init_latents, noise, t_next)
+        else:
+            noisy_orig = init_latents
+        latents = latents * mask_t + noisy_orig * (1.0 - mask_t)
+
+    # ── Decode latents to image ────────────────────────────────────────────
+    with torch.no_grad():
+        decoded = pipe.vae.decode(latents / pipe.vae.config.scaling_factor).sample
+    decoded = ((decoded + 1) / 2).clamp(0, 1)
+    out_np  = (decoded[0].permute(1, 2, 0).float().cpu().numpy() * 255).astype(np.uint8)
+    return Image.fromarray(out_np)
 
 
 _COLOR_MAP = {
@@ -1031,23 +1311,18 @@ def _parse_color_from_prompt(prompt: str):
 async def text_to_clothes_endpoint(
     reference: UploadFile = File(...),
     prompt: str = Form(...),
-    strength: str = Form('0.70'),
+    strength: str = Form('0.95'),
 ):
-    """Applies a clothing description to a human model image.
+    """Replace a specific garment described in the prompt while keeping the
+    face, pose, hands, hair, and background pixel-perfect.
 
-    Pipeline:
-      1. Load reference → composite to RGB (preserves pose / body shape).
-      2. Build a clothing-region mask (rembg silhouette minus top-20 % face band,
-         or geometric fallback).
-      3. Resize reference + mask to 512×512 for SD.
-      4. Run SD img2img on the ORIGINAL image at moderate strength.
-         — No white-priming: SD can see the person's pose, so generated clothing
-           stays aligned with the body.
-      5. Pixel-level composite at 512×512:
-             out = original × (1−mask) + SD_result × mask
-         Face and background pixels come 100 % from the original; only the
-         clothing region is taken from SD's output.
-      6. Resize back to original resolution and restore alpha channel.
+    New pipeline (no more whole-image regeneration):
+      1. SegFormer parses the image into per-pixel body / clothing labels.
+      2. Garment keywords in the prompt (`shirt`, `dress`, `pants`, …) decide
+         which labels to mask. Default = upper-clothes.
+      3. Real masked-latent inpainting only regenerates inside that mask.
+         Face, body shape, hands, and background are never touched.
+      4. Hard pixel-level composite as a final safety net.
     """
     if sd_pipe is None:
         raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
@@ -1057,76 +1332,105 @@ async def text_to_clothes_endpoint(
 
     try:
         reference_bytes = await reference.read()
-        strength_val = max(0.4, min(0.85, float(strength)))
+        strength_val = max(0.5, min(1.0, float(strength)))
 
         # ── Load reference ───────────────────────────────────────────────────
-        original_rgba = Image.open(io.BytesIO(reference_bytes)).convert('RGBA')
-        reference_rgb = Image.new("RGB", original_rgba.size, (255, 255, 255))
-        reference_rgb.paste(original_rgba, mask=original_rgba.split()[3])
-        original_size = reference_rgb.size
+        original_rgba  = Image.open(io.BytesIO(reference_bytes)).convert('RGBA')
+        original_alpha = original_rgba.split()[3]
+        reference_rgb  = Image.new("RGB", original_rgba.size, (255, 255, 255))
+        reference_rgb.paste(original_rgba, mask=original_alpha)
+        original_size  = reference_rgb.size
 
-        # ── Build clothing mask at original resolution ───────────────────────
-        print("   🎭 Building clothing mask…")
-        clothing_mask = _build_clothing_mask(reference_rgb)   # PIL 'L'
+        # ── Detect garment labels + target body region from prompt ───────────
+        labels = _detect_garment_labels(prompt)
+        region = _detect_garment_region(prompt)
+        all_labels = set(labels) | (region or set())
+        print(f"   🏷️  Garment labels: {sorted(labels)}  region: {sorted(region) if region else '—'}")
+
+        # ── Build pixel-precise garment mask covering the union ──────────────
+        print("   🎭 Building garment mask…")
+        garment_mask = _build_garment_mask(reference_rgb, all_labels)
+
+        if int(np.array(garment_mask).max()) < 30:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not find a matching body region in the reference image.",
+            )
+
+        # ── Pre-fill the masked region with the parsed colour ────────────────
+        # Gives SD a strong colour+shape signal so e.g. "red trousers" on a
+        # shorts model produces actual red trousers covering the legs, not a
+        # tinted version of the existing shorts.
+        color_rgb = _parse_color_from_prompt(prompt)
+        print(f"   🎨 Pre-fill colour: {color_rgb}")
+        prefilled_rgb = _color_prefill(reference_rgb, garment_mask, color_rgb)
 
         # ── Resize to 512×512 for SD ─────────────────────────────────────────
-        ref_512  = reference_rgb.resize((512, 512), Image.LANCZOS)
-        mask_512 = clothing_mask.resize((512, 512), Image.BILINEAR)
+        ref_512_orig = reference_rgb.resize((512, 512), Image.LANCZOS)
+        ref_512      = prefilled_rgb.resize((512, 512), Image.LANCZOS)
+        mask_512     = garment_mask.resize((512, 512), Image.BILINEAR)
 
-        ref_np  = np.array(ref_512).astype(np.float32)
-        mask_np = np.array(mask_512).astype(np.float32) / 255.0   # 0.0–1.0
-
-        # ── Prompt ───────────────────────────────────────────────────────────
-        enhanced_prompt = (
-            f"fashion photo, person wearing {prompt}, "
-            "high quality, photorealistic, studio lighting, sharp focus, "
-            "same pose, same person"
+        # ── Prompts ──────────────────────────────────────────────────────────
+        positive = (
+            f"a person wearing {prompt}, "
+            "fashion photography, photorealistic, sharp focus, "
+            "studio lighting, detailed fabric texture, high quality, 8k"
         )
-        negative_prompt = (
-            "deformed face, blurry face, bad anatomy, extra limbs, "
-            "low quality, watermark, text, logo"
+        negative = (
+            "deformed, distorted, blurry, low quality, watermark, text, logo, "
+            "extra limbs, bad anatomy, ugly, oversaturated, cartoon, illustration"
         )
-
-        print(f"   📝 Prompt: {enhanced_prompt}")
+        print(f"   📝 Prompt: {positive}")
         print(f"   🎚️ Strength: {strength_val}")
 
-        # ── SD img2img on ORIGINAL — pose / body shape fully preserved ───────
-        result_512 = sd_pipe(
-            prompt=enhanced_prompt,
-            negative_prompt=negative_prompt,
-            image=ref_512,
-            strength=strength_val,
-            num_inference_steps=30,
-            guidance_scale=7.5,
-        ).images[0]
+        # ── Real masked-latent inpainting ────────────────────────────────────
+        print("   🎨 Running masked-latent inpainting…")
+        result_512 = _masked_latent_inpaint(
+            image_pil       = ref_512,
+            mask_pil        = mask_512,
+            prompt          = positive,
+            negative_prompt = negative,
+            strength        = strength_val,
+            num_steps       = 30,
+            guidance        = 8.0,
+        )
 
-        # ── Pixel-level composite: original outside mask, SD inside mask ─────
-        result_np   = np.array(result_512).astype(np.float32)
-        final_np    = ref_np * (1.0 - mask_np[..., None]) + result_np * mask_np[..., None]
-        composited  = Image.fromarray(final_np.astype(np.uint8))
+        # ── Hard pixel-level composite (safety net) ──────────────────────────
+        # Blend against the *original* (not pre-filled) so mask edges don't
+        # leak the pre-fill colour onto skin/background.
+        ref_np    = np.array(ref_512_orig).astype(np.float32)
+        result_np = np.array(result_512).astype(np.float32)
+        m_np      = np.array(mask_512).astype(np.float32) / 255.0
+        final_np  = ref_np * (1.0 - m_np[..., None]) + result_np * m_np[..., None]
+        composited = Image.fromarray(final_np.astype(np.uint8))
 
-        # ── Restore original resolution and alpha channel ─────────────────────
+        # ── Restore original resolution and alpha channel ────────────────────
         composited = composited.resize(original_size, Image.LANCZOS).convert('RGBA')
-        composited.putalpha(original_rgba.split()[3])
+        composited.putalpha(original_alpha)
 
         byte_io = io.BytesIO()
         composited.save(byte_io, 'PNG')
         byte_io.seek(0)
 
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
         await log_generation_event(
             endpoint="text-to-clothes",
             status="success",
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=elapsed_ms,
+            metadata={"prompt": prompt, "labels": sorted(labels), "strength": strength_val},
         )
-        print("   ✅ Text-to-Clothes complete")
+        print(f"   ✅ Text-to-Clothes complete in {elapsed_ms}ms")
         return StreamingResponse(byte_io, media_type='image/png')
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error in text-to-clothes: {e}")
         await log_generation_event(
             endpoint="text-to-clothes",
             status="error",
             duration_ms=int((time.perf_counter() - start) * 1000),
+            error=str(e),
         )
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1294,11 +1598,10 @@ async def generate_human_endpoint(
 
         # Try to remove the background and place on solid white
         try:
-            from rembg import remove as rembg_remove
             print("   🪄 Removing background using rembg...")
             img_bytes_io = io.BytesIO()
             result.save(img_bytes_io, format="PNG")
-            result_bytes = rembg_remove(img_bytes_io.getvalue())
+            result_bytes = rembg_remove_cpu(img_bytes_io.getvalue())
             img_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
             
             # Place the cutout (alpha-composited) on a pure WHITE background

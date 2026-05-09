@@ -9,7 +9,8 @@ python-jose[cryptography]>=3.3.0
 email-validator>=2.2.0
 pymongo>=4.0
 
-# torch & torchvision installed separately — see README for CPU-only install command
+# Install torch with CUDA 12.1 support (RTX 3070 / driver 580+):
+# pip install torch==2.2.2+cu121 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 Pillow>=10.1.0
 numpy>=1.24.3
 diffusers>=0.25.0
@@ -17,9 +18,10 @@ transformers>=4.36.0
 accelerate>=0.25.0 
 safetensors>=0.4.1
 
-# Stylebend integration
+# Stylebend / image processing
 lpips==0.1.4
 opencv-python
 scikit-image
 rembg
+facenet-pytorch
 

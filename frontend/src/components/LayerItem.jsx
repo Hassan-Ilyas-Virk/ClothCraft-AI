@@ -108,12 +108,12 @@ const LayerItem = ({
                     if (layer.type === 'reference') return;
                     e.preventDefault();
                     e.dataTransfer.dropEffect = 'move';
-                    onDragOver(layer.id);
+                    onDragOver(layer.id, e);
                 }}
                 onDrop={(e) => {
                     if (layer.type === 'reference') return;
                     e.preventDefault();
-                    onDrop(layer.id);
+                    onDrop(layer.id, e);
                 }}
                 onDragEnd={() => {
                     setIsDragging(false);

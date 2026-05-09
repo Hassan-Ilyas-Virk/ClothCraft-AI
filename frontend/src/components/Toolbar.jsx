@@ -95,7 +95,6 @@ const Toolbar = ({
             <button
                 className={`toolbar-tool live-toggle-btn${liveMode ? ' live-active' : ''}`}
                 onClick={onLiveModeToggle}
-                disabled={disabled}
                 title={liveMode ? 'Disable Live Preview' : 'Enable Live Pix2Pix Preview'}
             >
                 <Zap size={18} strokeWidth={2} />

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Sparkles, X, ImagePlus, SlidersHorizontal, ChevronLeft, PenLine, Home } from 'lucide-react';
+import { Upload, Sparkles, X, ImagePlus, SlidersHorizontal, ChevronLeft, PenLine, Home, Moon, Sun } from 'lucide-react';
+import { useDarkMode } from './hooks/useDarkMode';
 import { getUser, login as authLogin, signup as authSignup, logout as authLogout } from './services/auth';
 import * as projectService from './services/projects';
 import LoginPage from './pages/LoginPage';
@@ -30,6 +31,7 @@ import {
 
 function App() {
     const canvasRef = useRef(null);
+    const [isDark, toggleDark] = useDarkMode();
 
     // ── Routing / auth / project state ─────────────────────────────────
     const [currentView,    setCurrentView]    = useState('loading'); // 'loading'|'login'|'home'|'canvas'
@@ -43,6 +45,7 @@ function App() {
     const [savedCanvasSize, setSavedCanvasSize] = useState(null);
     const [currentCanvasSize, setCurrentCanvasSize] = useState({ width: 1024, height: 1024 });
     const hydrationStateRef = useRef({ projectId: null, ready: false, targetSize: null });
+    const didInitialFitRef  = useRef(false); // prevent fitToScreen on every addLayer
     // ───────────────────────────────────────────────────────────────────
 
     const {
@@ -201,11 +204,21 @@ function App() {
         }
     }, [currentProject?.id]);
 
+    // Reset the initial-fit flag whenever the user opens a different project or view.
+    useEffect(() => {
+        didInitialFitRef.current = false;
+    }, [currentView, currentProject?.id]);
+
     // Apply saved canvas dimensions after canvas mounts/layers load.
+    // layers.length stays in deps so this fires once the first layer arrives,
+    // but didInitialFitRef prevents it from re-running on every subsequent addLayer.
     useEffect(() => {
         if (currentView !== 'canvas') return;
         if (!canvasRef.current) return;
         if (layers.length === 0) return;
+        if (didInitialFitRef.current) return; // already fitted for this project
+
+        didInitialFitRef.current = true;
 
         if (savedCanvasSize) {
             hydrationStateRef.current = {
@@ -972,6 +985,8 @@ function App() {
             onRenameProject={handleRenameProject}
             onLogout={handleLogout}
             onUserUpdate={setCurrentUser}
+            isDark={isDark}
+            onToggleDark={toggleDark}
         />
     );
     
@@ -983,27 +998,34 @@ function App() {
                     <ClothCraftLogo size={34} color="black" />
                 </button>
 
-                {layers.length > 0 && (
-                    <div className="toolbar-column-divider" />
-                )}
+                <div className="toolbar-column-divider" />
 
-                {layers.length > 0 && (
-                    <Toolbar
-                        activeTool={activeTool}
-                        onToolChange={setActiveTool}
-                        brushColor={brushColor}
-                        onColorChange={setBrushColor}
-                        moodboardColors={moodboardColors}
-                        onOpenMoodboard={handleOpenMoodboard}
-                        onUndo={handleUndo}
-                        onRedo={handleRedo}
-                        canUndo={historyState.canUndo}
-                        canRedo={historyState.canRedo}
-                        disabled={isProcessing || !activeLayerId}
-                        liveMode={liveMode}
-                        onLiveModeToggle={() => setLiveMode(m => !m)}
-                    />
-                )}
+                <button
+                    className="home-sidebar-btn"
+                    onClick={toggleDark}
+                    title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                    style={{ color: isDark ? '#f9cc46' : '#7c3aed' }}
+                >
+                    {isDark ? <Sun size={20} /> : <Moon size={20} />}
+                </button>
+
+                <div className="toolbar-column-divider" />
+
+                <Toolbar
+                    activeTool={activeTool}
+                    onToolChange={setActiveTool}
+                    brushColor={brushColor}
+                    onColorChange={setBrushColor}
+                    moodboardColors={moodboardColors}
+                    onOpenMoodboard={handleOpenMoodboard}
+                    onUndo={handleUndo}
+                    onRedo={handleRedo}
+                    canUndo={historyState.canUndo}
+                    canRedo={historyState.canRedo}
+                    disabled={isProcessing || !activeLayerId}
+                    liveMode={liveMode}
+                    onLiveModeToggle={() => setLiveMode(m => !m)}
+                />
             </div>
 
             {error && (

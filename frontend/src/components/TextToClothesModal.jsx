@@ -8,7 +8,7 @@ const GARMENT_CHIPS = ['shirt', 'dress', 'blazer', 'jacket', 'jeans', 'suit', 'h
 
 const TextToClothesModal = ({ referenceLayer, onClose, onApply }) => {
     const [prompt, setPrompt] = useState('');
-    const [strength, setStrength] = useState(0.55);
+    const [strength, setStrength] = useState(0.95);
     const [preview, setPreview] = useState(null);
     const [isGenerating, setIsGenerating] = useState(false);
     const [status, setStatus] = useState('');
@@ -129,17 +129,17 @@ const TextToClothesModal = ({ referenceLayer, onClose, onApply }) => {
                             <input
                                 type="range"
                                 className="ttc-range"
-                                min="0.3"
-                                max="0.85"
+                                min="0.6"
+                                max="1.0"
                                 step="0.05"
                                 value={strength}
                                 onChange={(e) => setStrength(parseFloat(e.target.value))}
                                 style={{
-                                    background: `linear-gradient(to right, var(--btn-purple) 0%, var(--btn-purple) ${((strength - 0.3) / 0.55) * 100}%, #e5e7eb ${((strength - 0.3) / 0.55) * 100}%, #e5e7eb 100%)`
+                                    background: `linear-gradient(to right, var(--btn-purple) 0%, var(--btn-purple) ${((strength - 0.6) / 0.4) * 100}%, #e5e7eb ${((strength - 0.6) / 0.4) * 100}%, #e5e7eb 100%)`
                                 }}
                             />
                             <p className="ttc-hint">
-                                Lower = preserve original more · Higher = stronger clothing change
+                                Lower = subtle restyle · Higher = full garment replacement
                             </p>
                         </div>
 

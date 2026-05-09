@@ -34,8 +34,13 @@ const LayersPanel = ({
         setDraggedLayerId(layerId);
     };
 
-    const handleLayerDragOver = (layerId) => {
+    const handleLayerDragOver = (layerId, e) => {
         if (!draggedLayerId || draggedLayerId === layerId) return;
+        const idx = drawingLayersTopDown.findIndex(l => l.id === layerId);
+        if (idx === -1) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const isTopHalf = e.clientY < rect.top + rect.height / 2;
+        setDragOverGapIndex(isTopHalf ? idx : idx + 1);
     };
 
     const handleGapDragOver = (gapIndex) => {
@@ -43,7 +48,12 @@ const LayersPanel = ({
         setDragOverGapIndex(gapIndex);
     };
 
-    const handleLayerDrop = () => {
+    const handleLayerDrop = (layerId, e) => {
+        if (dragOverGapIndex !== null) {
+            handleGapDrop(dragOverGapIndex);
+        } else {
+            setDraggedLayerId(null);
+        }
     };
 
     const handleGapDrop = (gapIndex) => {

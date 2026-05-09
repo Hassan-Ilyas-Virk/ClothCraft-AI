@@ -1,7 +1,7 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   Sparkles, Plus, LogOut, Trash2, FolderOpen,
-  PenLine, Clock, MoreVertical, ImageIcon, Settings
+  PenLine, Clock, MoreVertical, ImageIcon, Settings, Moon, Sun
 } from 'lucide-react';
 import { formatProjectDate } from '../services/projects';
 import ClothCraftLogo from '../components/ClothCraftLogo';
@@ -156,7 +156,7 @@ const NewProjectCard = ({ onClick }) => (
 
 /* ── Main ─────────────────────────────────────────────────────────── */
 
-const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject, onRenameProject, onLogout, onUserUpdate }) => {
+const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject, onRenameProject, onLogout, onUserUpdate, isDark, onToggleDark }) => {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [showProfile, setShowProfile] = useState(false);
   const [localUser, setLocalUser] = useState(user);
@@ -196,6 +196,15 @@ const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject
             )}
             <span className="hp-header-username">{localUser?.displayName}</span>
             <Settings size={14} className="hp-user-settings-icon" />
+          </button>
+
+          <button
+            className="hp-logout-btn"
+            onClick={onToggleDark}
+            title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            style={{ color: isDark ? '#f9cc46' : '#7c3aed' }}
+          >
+            {isDark ? <Sun size={16} /> : <Moon size={16} />}
           </button>
 
           <button className="hp-logout-btn" onClick={onLogout} title="Sign out">
