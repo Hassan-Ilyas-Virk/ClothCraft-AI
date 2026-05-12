@@ -5,12 +5,15 @@ import os
 os.environ.setdefault("ORT_LOGGING_LEVEL", "4")   # 4 = FATAL only
 
 import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
-warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
-warnings.filterwarnings("ignore", message=".*_register_pytree_node.*", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*weights_only.*", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*CLIPFeatureExtractor.*", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*text_config_dict.*")
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, message=".*_register_pytree_node.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pretrained.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*weight enum.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*flash attention.*")
+
+import logging
+# text_config_dict messages come from transformers' logger, not warnings.warn
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 import torch
 import io
