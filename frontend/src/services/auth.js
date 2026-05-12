@@ -39,3 +39,29 @@ export async function isAuthenticated() {
   const user = await getUser();
   return !!user;
 }
+
+export async function updateProfile({ displayName, avatarUrl }) {
+  const body = {};
+  if (displayName !== undefined) body.displayName = displayName;
+  if (avatarUrl !== undefined) body.avatarUrl = avatarUrl;
+  return await apiRequest('/auth/profile', {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function changePassword({ currentPassword, newPassword }) {
+  return await apiRequest('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
+
+export async function googleLogin(credential) {
+  const data = await apiRequest('/auth/google', {
+    method: 'POST',
+    body: JSON.stringify({ credential }),
+  });
+  if (data?.token) tokenStore.set(data.token);
+  return data?.user ?? data;
+}

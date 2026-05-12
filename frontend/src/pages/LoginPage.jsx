@@ -2,13 +2,16 @@
  * LoginPage — sign in / sign up UI.
  * All auth logic is delegated to service functions passed as props.
  */
-import React, { useState } from 'react';
-import { Sparkles, Mail, Lock, User, ArrowRight, Eye, EyeOff } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { User, ArrowRight } from 'lucide-react';
 import ClothCraftLogo from '../components/ClothCraftLogo';
 import Iridescence from '../components/Iridescence';
 import './LoginPage.css';
 
-const LoginPage = ({ onLogin, onSignup }) => {
+const IRIDESCENCE_COLOR = [0.77, 0.52, 0.99];
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+
+const LoginPage = ({ onLogin, onSignup, onGoogleLogin }) => {
   const [mode, setMode]           = useState('login'); // 'login' | 'signup'
   const [email, setEmail]         = useState('');
   const [password, setPassword]   = useState('');
@@ -16,6 +19,54 @@ const LoginPage = ({ onLogin, onSignup }) => {
   const [showPass, setShowPass]   = useState(false);
   const [error, setError]         = useState('');
   const [loading, setLoading]     = useState(false);
+  const googleBtnRef              = useRef(null);
+
+  // Load Google Identity Services and render their button into a hidden overlay
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID || !onGoogleLogin) return;
+
+    const handleCredential = async ({ credential }) => {
+      setError('');
+      setLoading(true);
+      try {
+        await onGoogleLogin(credential);
+      } catch (err) {
+        setError(err.message || 'Google sign-in failed.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    const initGoogle = () => {
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleCredential,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+      if (googleBtnRef.current) {
+        window.google.accounts.id.renderButton(googleBtnRef.current, {
+          type: 'standard',
+          theme: 'outline',
+          size: 'large',
+          width: googleBtnRef.current.offsetWidth || 320,
+        });
+      }
+    };
+
+    if (window.google?.accounts) {
+      initGoogle();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = initGoogle;
+    document.head.appendChild(script);
+    return () => { document.head.removeChild(script); };
+  }, [onGoogleLogin]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -70,10 +121,17 @@ const LoginPage = ({ onLogin, onSignup }) => {
             />
           </div>
 
-          <button className="login-google-btn" type="button">
-            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" width="18" />
-            Continue with Google
-          </button>
+          {GOOGLE_CLIENT_ID && (
+            <div className="login-google-btn-wrap">
+              {/* Our styled button — visible to the user */}
+              <button className="login-google-btn" type="button" tabIndex={-1} aria-hidden="true">
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="" width="18" />
+                Continue with Google
+              </button>
+              {/* Google's rendered button overlaid transparently — captures the click */}
+              <div ref={googleBtnRef} className="login-google-overlay" aria-label="Continue with Google" />
+            </div>
+          )}
 
           <div className="login-divider">
             <span>or</span>
