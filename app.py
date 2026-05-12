@@ -348,6 +348,14 @@ except Exception as e:
     print(f"⚠️  Error loading Pix2Pix model: {e} — doodle translation disabled.")
     pix2pix_model = None
 
+# Fix huggingface_hub deprecated import for diffusers <= 0.25.0
+try:
+    import huggingface_hub
+    if not hasattr(huggingface_hub, 'cached_download'):
+        huggingface_hub.cached_download = huggingface_hub.hf_hub_download
+except ImportError:
+    pass
+
 # Load Stable Diffusion Img2Img model for Clothify feature
 # Realistic Vision is a standard SD 1.5 model (4-ch), NOT an inpainting model (9-ch),
 # so we must use StableDiffusionImg2ImgPipeline instead of the Inpaint pipeline.
