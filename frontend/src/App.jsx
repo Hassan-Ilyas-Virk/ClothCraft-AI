@@ -46,6 +46,7 @@ function App() {
     const [currentCanvasSize, setCurrentCanvasSize] = useState({ width: 1024, height: 1024 });
     const hydrationStateRef = useRef({ projectId: null, ready: false, targetSize: null });
     const didInitialFitRef  = useRef(false); // prevent fitToScreen on every addLayer
+    const isCreatingProjectRef = useRef(false);
     // ───────────────────────────────────────────────────────────────────
 
     const {
@@ -402,6 +403,8 @@ function App() {
     };
 
     const handleNewProject = async () => {
+        if (isCreatingProjectRef.current) return;
+        isCreatingProjectRef.current = true;
         try {
             let knownProjects = userProjects;
             try {
@@ -440,6 +443,8 @@ function App() {
             setCurrentView('canvas');
         } catch (err) {
             window.alert(err.message || 'Failed to create project');
+        } finally {
+            isCreatingProjectRef.current = false;
         }
     };
 
