@@ -1,3 +1,11 @@
+/**
+ * ImageCropperModal — interactive crop dialog for single-image upload.
+ *
+ * Shown when the user uploads a reference image or drawing layer image.
+ * react-easy-crop provides the pan/zoom/crop interaction; getCroppedImg
+ * bakes the selected pixel crop region onto an offscreen canvas and returns
+ * a JPEG blob that is then loaded onto the layer.
+ */
 import React, { useState, useCallback } from 'react';
 import Cropper from 'react-easy-crop';
 import { X, Check } from 'lucide-react';
@@ -24,33 +32,26 @@ async function getCroppedImg(imageSrc, pixelCrop) {
         return null;
     }
 
-    // Set canvas dimensions to the exact requested crop size 
-    // This removes any padding or squishing.
-    canvas.width = pixelCrop.width;
+    // Size the output canvas to exactly the crop region so there is no padding
+    // and the aspect ratio matches what react-easy-crop reported.
+    canvas.width  = pixelCrop.width;
     canvas.height = pixelCrop.height;
 
-    // Draw the cropped image onto the canvas
+    // Copy only the cropped rectangle from the source image onto the canvas.
+    // Source rect: (pixelCrop.x, pixelCrop.y) → (width, height)
+    // Dest rect:   (0, 0) → (width, height) — fills the entire output canvas.
     ctx.drawImage(
         image,
-        pixelCrop.x,
-        pixelCrop.y,
-        pixelCrop.width,
-        pixelCrop.height,
-        0,
-        0,
-        pixelCrop.width,
-        pixelCrop.height
+        pixelCrop.x, pixelCrop.y, pixelCrop.width, pixelCrop.height,
+        0, 0, pixelCrop.width, pixelCrop.height
     );
 
-    // As blob
+    // Return as a JPEG blob — StyleGAN-Human works best with JPEG input,
+    // and PNG would be larger without quality benefit at this stage.
     return new Promise((resolve, reject) => {
         canvas.toBlob((file) => {
-            if (file) {
-                // Ensure output is exactly the right ratio structure
-                resolve(file);
-            } else {
-                reject(new Error("Canvas failure"));
-            }
+            if (file) resolve(file);
+            else reject(new Error("Canvas failure"));
         }, 'image/jpeg');
     });
 }
@@ -69,6 +70,7 @@ const ImageCropperModal = ({ imageUrl, onClose, onCropComplete }) => {
         if (!croppedAreaPixels) return;
         setIsCropping(true);
         try {
+            // Bake the selected crop region to a JPEG blob and pass it back to the caller.
             const croppedBlob = await getCroppedImg(imageUrl, croppedAreaPixels);
             onCropComplete(croppedBlob);
         } catch (e) {

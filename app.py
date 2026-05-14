@@ -98,14 +98,17 @@ password_hasher = PasswordHasher()
 
 
 def now_utc() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
 def utc_timestamp_ms() -> int:
+    """Return the current UTC time as milliseconds since epoch (for createdAt/updatedAt fields)."""
     return int(time.time() * 1000)
 
 
 def parse_object_id(raw_id: str) -> ObjectId:
+    """Convert a hex string to a MongoDB ObjectId, raising HTTP 400 on invalid input."""
     try:
         return ObjectId(raw_id)
     except Exception as exc:
@@ -113,6 +116,9 @@ def parse_object_id(raw_id: str) -> ObjectId:
 
 
 def serialize_project(doc: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a full project document (including layersSnapshot) for API responses.
+    Used when opening an existing project — the layersSnapshot is needed to hydrate the canvas.
+    """
     return {
         "id": str(doc["_id"]),
         "userId": doc["userId"],
@@ -125,6 +131,9 @@ def serialize_project(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def serialize_project_summary(doc: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a lightweight project summary (omits layersSnapshot) for the project list.
+    Keeping layersSnapshot out of the list response significantly reduces payload size.
+    """
     return {
         "id": str(doc["_id"]),
         "userId": doc["userId"],
@@ -136,6 +145,7 @@ def serialize_project_summary(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def serialize_user(doc: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a user document for API responses (never includes passwordHash)."""
     return {
         "id": str(doc["_id"]),
         "email": doc["email"],
@@ -146,10 +156,14 @@ def serialize_user(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_project_name(name: str) -> str:
+    """Lowercase + collapse whitespace for case-insensitive uniqueness checks."""
     return " ".join(name.strip().lower().split())
 
 
 def build_name_conflict_filter(user_id: str, normalized_name: str, raw_name: str, exclude_id: Optional[ObjectId] = None) -> dict[str, Any]:
+    """Build a MongoDB filter that matches any project whose name collides with raw_name
+    (case-insensitive, whitespace-tolerant). Pass exclude_id when renaming to skip self.
+    """
     trimmed = raw_name.strip()
     escaped = re.escape(trimmed)
     conflict_filter: dict[str, Any] = {
@@ -165,6 +179,9 @@ def build_name_conflict_filter(user_id: str, normalized_name: str, raw_name: str
 
 
 def create_access_token(user_id: str) -> str:
+    """Issue a signed JWT with the user's ObjectId as the 'sub' claim.
+    Expiry is controlled by JWT_EXPIRE_MINUTES (default 24 h).
+    """
     expire = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES)
     payload = {
         "sub": user_id,
@@ -175,6 +192,10 @@ def create_access_token(user_id: str) -> str:
 
 
 def set_auth_cookie(response: Response, token: str) -> None:
+    """Attach the JWT as an HttpOnly cookie on the response.
+    HttpOnly prevents JavaScript from reading the token; secure/samesite are
+    configurable via env vars for local-dev vs. production deployments.
+    """
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
         value=token,
@@ -187,6 +208,7 @@ def set_auth_cookie(response: Response, token: str) -> None:
 
 
 def clear_auth_cookie(response: Response) -> None:
+    """Remove the auth cookie on the response (sent back to the client on logout)."""
     response.delete_cookie(
         key=AUTH_COOKIE_NAME,
         httponly=True,
@@ -197,6 +219,12 @@ def clear_auth_cookie(response: Response) -> None:
 
 
 class MongoManager:
+    """Lifecycle wrapper around Motor (async MongoDB driver).
+
+    Handles connect/disconnect within the FastAPI lifespan context manager and
+    ensures all required indexes exist before the first request is served.
+    The app stores a single instance at app.state.mongo.
+    """
     def __init__(self, uri: str, db_name: str, timeout_ms: int = 5000):
         self.uri = uri
         self.db_name = db_name
@@ -217,6 +245,14 @@ class MongoManager:
         self.db = None
 
     async def _ensure_indexes(self) -> None:
+        """Create indexes idempotently on startup (Motor no-ops if they already exist).
+
+        Indexes created:
+          users.email          — unique; used by login and duplicate-check
+          projects.(userId, updatedAt DESC) — used by list_projects sort
+          projects.(userId, nameNormalized) — unique; enforces per-user name uniqueness
+          generation_logs.createdAt DESC    — used by analytics queries
+        """
         if self.db is None:
             return
         await self.db["users"].create_index([("email", ASCENDING)], unique=True)
@@ -317,6 +353,12 @@ app.add_middleware(
 
 
 async def get_current_user(request: Request) -> dict[str, Any]:
+    """FastAPI dependency that validates the JWT and returns the user document.
+
+    Token lookup order: Authorization: Bearer header → HttpOnly cookie.
+    Raises HTTP 401 if the token is missing, expired, invalid, or the user no
+    longer exists in the database.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -420,7 +462,9 @@ except Exception as e:
     stylegan_model = None
 
 
-# Define the image transformations (should match training)
+# Pix2Pix input pre-processing: resize to 256×256 (matches the training crop size),
+# convert to [0,1] tensor, then normalize to [-1,1] — the range expected by the
+# UnetGenerator's tanh output activation.
 transform = transforms.Compose([
     transforms.Resize((256, 256)), # Matches 'crop_size: 256'
     transforms.ToTensor(),
@@ -435,6 +479,10 @@ async def log_generation_event(
     metadata: Optional[dict[str, Any]] = None,
     error: Optional[str] = None,
 ) -> None:
+    """Write a non-blocking analytics record for every AI generation call.
+    Failures are swallowed and printed rather than propagated so a logging
+    error can never cause a user-facing 500 response.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         return
@@ -584,17 +632,22 @@ def translate_doodle(doodle_bytes, return_rgba=False, fast=False):
 
     original = Image.open(io.BytesIO(doodle_bytes))
 
+    # Pix2Pix expects a solid-background RGB image.
+    # Flatten any transparent areas onto white so the model doesn't see black holes.
     if original.mode == 'RGBA':
         image = Image.new("RGB", original.size, (255, 255, 255))
         image.paste(original, mask=original.split()[3])
     else:
         image = original.convert('RGB')
 
+    # Apply the standard pix2pix preprocessing (256×256 resize + [-1,1] normalisation).
     input_tensor = transform(image).unsqueeze(0).to(device)
 
+    # Forward pass — no gradients needed during inference.
     with torch.no_grad():
         output_tensor = pix2pix_model(input_tensor)
 
+    # De-normalise from [-1,1] back to [0,1] then convert to a PIL image.
     output_image = output_tensor.squeeze(0).cpu()
     output_image = (output_image * 0.5) + 0.5
     output_image = transforms.ToPILImage()(output_image)
@@ -647,51 +700,45 @@ def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", 
     if sd_pipe is None:
         raise Exception("Stable Diffusion model not loaded")
     
-    # Load reference image with Alpha channel
+    # Preserve the original alpha channel — we'll restore it after compositing.
     original_rgba = Image.open(io.BytesIO(reference_image_bytes)).convert('RGBA')
-    
-    # Composite onto pure white background so SD doesn't see black voids
+
+    # Flatten alpha onto white so SD never sees transparent (black) voids.
     reference_image = Image.new("RGB", original_rgba.size, (255, 255, 255))
     reference_image.paste(original_rgba, mask=original_rgba.split()[3])
 
-    # The mask passed here is the Pix2Pix output (RGB with black background).
-    # If we simply convert to Grayscale ('L'), colors like red or cyan become gray,
-    # causing transparency in the mask and creating a "fade" or ghosting effect.
-    # Instead, we threshold it: any pixel that isn't black becomes solid white in the mask.
+    # Build a binary mask from the Pix2Pix output.
+    # Converting the coloured Pix2Pix result to grayscale would turn saturated
+    # colours (red, cyan) into mid-grey, creating unwanted partial transparency.
+    # A max-channel brightness threshold gives a clean object vs background split.
     pix2pix_img = Image.open(io.BytesIO(mask_bytes)).convert('RGB')
     p2p_np = np.array(pix2pix_img)
-    # Brightness threshold to detect the object vs black background
-    mask_np_raw = (np.max(p2p_np, axis=2) > 20).astype(np.uint8) * 255
+    mask_np_raw = (np.max(p2p_np, axis=2) > 20).astype(np.uint8) * 255  # >20 = not background
     mask_image = Image.fromarray(mask_np_raw, mode='L')
-    
-    # Resize to optimal size for SD (512x512 recommended)
+
     original_size = reference_image.size
+    # SD 1.5 produces best results at 512×512; larger inputs slow inference without quality gain.
     reference_image = reference_image.resize((512, 512), Image.LANCZOS)
-    
-    # Resize mask with BILINEAR (LANCZOS can create ringing on masks)
-    # Then apply a slight Gaussian blur to smooth the transition for the AI
-    # Keep radius small (2) just for anti-aliasing the sharp threshold
+
+    # BILINEAR for masks avoids the ringing artefacts LANCZOS introduces on hard edges.
     mask_image = mask_image.resize((512, 512), Image.BILINEAR)
+    # A tiny Gaussian blur softens the hard threshold edge so SD blends more naturally.
     mask_image = mask_image.filter(ImageFilter.GaussianBlur(radius=2))
-    
-    # --- img2img approach ---
-    # The frontend already composited the Pix2Pix translated doodle onto the
-    # reference image, so `reference_image` already contains the desired design
-    # (e.g. the red shirt) in the masked region.  We pass it directly to img2img
-    # so SD refines/blends what's already there instead of starting from white.
-    mask_np = np.array(mask_image).astype(np.float32) / 255.0  # 0.0–1.0
-    
-    # Use prompt directly without forcing clothing/fabric keywords
+
+    # The frontend composited the Pix2Pix result onto the reference before calling this,
+    # so the masked region already shows the desired garment colour/texture.
+    # img2img at the given strength refines those pixels without regenerating from scratch.
+    mask_np = np.array(mask_image).astype(np.float32) / 255.0  # float mask for compositing
+
     enhanced_prompt = prompt if prompt else "high quality, detailed"
-    
-    # Negative prompt to protect face and maintain quality
+
+    # Face-protection negative: prevents SD from regenerating facial features inside the mask.
     negative_prompt = "face changes, facial features, distorted face, blurry face, deformed face, bad anatomy, low quality, blurry, distorted"
-    
+
     print(f"🎚️ Img2Img inpainting with strength: {strength}")
     print(f"📝 Prompt: {enhanced_prompt}")
     print(f"🚫 Negative prompt: {negative_prompt}")
-    
-    # Run img2img directly on the composited reference (already has doodle on it)
+
     result = sd_pipe(
         prompt=enhanced_prompt,
         negative_prompt=negative_prompt,
@@ -700,14 +747,15 @@ def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", 
         num_inference_steps=50,
         guidance_scale=7.5,
     ).images[0]
-    
-    # --- Composite back: keep original pixels outside the mask ---
+
+    # Hard pixel composite: blend SD output inside the mask, keep original outside.
+    # This guarantees that pixels outside the doodle region are always 100% original.
     ref_np = np.array(reference_image).astype(np.float32)
     result_np = np.array(result.resize((512, 512), Image.LANCZOS)).astype(np.float32)
     final_np = ref_np * (1.0 - mask_np[..., None]) + result_np * mask_np[..., None]
     composited = Image.fromarray(final_np.astype(np.uint8))
-    
-    # Resize back to original size and restore the original alpha channel
+
+    # Scale back to original resolution and re-attach the original alpha channel.
     composited = composited.resize(original_size, Image.LANCZOS).convert('RGBA')
     composited.putalpha(original_rgba.split()[3])
     
@@ -1003,7 +1051,10 @@ async def refine_stylebend_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Global cache for latents to make slider adjustments instant
+# Latent cache: maps MD5(image_bytes + outpaint_flag) → projected W latent.
+# GAN inversion (400 optimizer steps per image) is expensive (~30 s on GPU).
+# Caching means repeated blend requests with the same images only invert once,
+# making the Stylebend alpha slider nearly instant after the first call.
 latent_cache = {}
 import hashlib
 
@@ -1466,7 +1517,17 @@ async def blend_styles(
     outpaint1: str = Form('false'),
     outpaint2: str = Form('false'),
 ):
-    """Projects two images to latent space and blends them"""
+    """Stylebend: blend two fashion images in StyleGAN-Human latent space.
+
+    Pipeline:
+      1. Project each image to the W+ latent space via GAN inversion (400 steps).
+         Results are cached by MD5(bytes + outpaint flag) so slider moves are fast.
+      2. If outpaint is enabled, extend the image to 512×1024 full-body canvas
+         before inversion (improves results for bust/half-body shots).
+      3. Interpolate linearly across 21 alpha values (0.0 → 1.0 in 0.05 steps)
+         and return all frames as base64-encoded JPEG strings.
+      The frontend slider selects which pre-computed frame to display.
+    """
     if stylegan_model is None:
         raise HTTPException(status_code=500, detail="StyleGAN model not loaded")
 
@@ -1547,7 +1608,15 @@ async def generate_human_endpoint(
     steps: str = Form('35'),
     guidance: str = Form('7.5'),
 ):
-    """Generates a human figure from a text prompt using Stable Diffusion"""
+    """Generate a full-body fashion model image from a text prompt using SD txt2img.
+
+    Colour anchoring: detected colour keywords are repeated 4× paired with the
+    garment noun (e.g. "black suit, black suit, black suit, black suit, …") before
+    the main prompt to counter SD's tendency to apply colours to skin or hair.
+    Dark colours also push light-clothing tokens into the negative prompt.
+    Background is removed with rembg and replaced with solid white so the result
+    can be used as a reference layer without an unwanted scene background.
+    """
     if txt2img_pipe is None:
         raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
 
@@ -1663,8 +1732,16 @@ async def generate_human_endpoint(
 # Route for AI Color Suggestions
 @app.post('/suggest-colors')
 async def suggest_colors_endpoint(prompt: str = Form(...)):
-    """Suggests a color palette from a text prompt using HSL color theory + keyword mapping.
-    Generates clean, accurate swatch strip images directly - no generative AI needed.
+    """Generate a 5-swatch colour palette PNG from a text prompt.
+
+    Algorithm (no generative AI):
+      1. Match emotion/aesthetic/colour keywords against HUE_KEYWORDS to get
+         (base_hue, saturation, lightness_min, lightness_max) tuples.
+      2. Average all matched tuples into a single emotional colour base.
+      3. Build 5 analogous hues (±12°, ±22° around the base) spanning the
+         lightness range, using slightly varying saturation for harmony.
+      4. Render as a clean 5-swatch PNG strip and return it as a StreamingResponse.
+    Falls back to an MD5-hash-derived hue if no keywords are matched.
     """
     import colorsys, hashlib
     from PIL import ImageDraw
@@ -1836,6 +1913,9 @@ async def suggest_colors_endpoint(prompt: str = Form(...)):
 
 @app.get('/health/db')
 async def health_db():
+    """Liveness/readiness probe: returns DB connection status.
+    Used by deployment health checks and the frontend's startup retry loop.
+    """
     mongo: MongoManager = app.state.mongo
     is_connected = mongo.db is not None
     payload = {
@@ -1850,6 +1930,10 @@ async def health_db():
 
 @app.post('/auth/signup')
 async def signup(payload: SignupRequest):
+    """Register a new user. Passwords are hashed with Argon2id before storage.
+    Returns the new user object and a JWT token (also set as a cookie).
+    Raises 409 if the email is already registered.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -1878,6 +1962,12 @@ async def signup(payload: SignupRequest):
 
 @app.post('/auth/login')
 async def login(payload: LoginRequest):
+    """Authenticate a user with email + password (Argon2id verify).
+    If the stored hash is outdated (Argon2 parameter upgrade), it is rehashed
+    transparently. Returns user + JWT on success; 401 on wrong credentials.
+    The lookup + verify always runs even when the email is unknown to prevent
+    timing-based user enumeration.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -1907,6 +1997,7 @@ async def login(payload: LoginRequest):
 
 @app.post('/auth/logout')
 async def logout():
+    """Clear the auth cookie. The client is also expected to discard its local JWT."""
     response = JSONResponse({"logout": True})
     clear_auth_cookie(response)
     return response
@@ -1914,6 +2005,7 @@ async def logout():
 
 @app.get('/auth/me')
 async def auth_me(current_user: dict[str, Any] = Depends(get_current_user)):
+    """Return the authenticated user's profile. Used for session restore on app mount."""
     return JSONResponse(serialize_user(current_user))
 
 
@@ -1922,6 +2014,7 @@ async def update_profile(
     payload: UpdateProfileRequest,
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
+    """Update display name and/or avatar. avatarUrl is a base64 data URL capped at ~180 KB."""
     mongo: MongoManager = app.state.mongo
     updates: dict[str, Any] = {"updatedAt": utc_timestamp_ms()}
     if payload.displayName is not None:
@@ -1943,6 +2036,9 @@ async def change_password(
     payload: ChangePasswordRequest,
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
+    """Verify the current password before replacing the hash with the new one.
+    Argon2id is used for both verification and re-hashing.
+    """
     try:
         password_hasher.verify(current_user["passwordHash"], payload.currentPassword)
     except (VerifyMismatchError, InvalidHash):
@@ -1957,6 +2053,11 @@ async def change_password(
 
 @app.post('/projects')
 async def create_project(project: ProjectCreate, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Create a new empty project for the authenticated user.
+    Raises 409 if a project with the same name (case-insensitive) already exists.
+    The DuplicateKeyError catch guards against the race condition where two concurrent
+    requests pass the conflict check simultaneously before either inserts.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -1987,6 +2088,9 @@ async def create_project(project: ProjectCreate, current_user: dict[str, Any] = 
 
 @app.get('/projects')
 async def list_projects(current_user: dict[str, Any] = Depends(get_current_user)):
+    """Return all projects for the authenticated user, sorted newest first.
+    layersSnapshot is excluded from the projection to keep the list payload small.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -2001,6 +2105,9 @@ async def list_projects(current_user: dict[str, Any] = Depends(get_current_user)
 
 @app.get('/projects/item/{project_id}')
 async def get_project(project_id: str, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Fetch a single project by ID (includes layersSnapshot for canvas hydration).
+    userId check in the query ensures users cannot access each other's projects.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -2014,6 +2121,11 @@ async def get_project(project_id: str, current_user: dict[str, Any] = Depends(ge
 
 @app.put('/projects/{project_id}')
 async def save_project(project_id: str, payload: ProjectSave, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Persist the full canvas state for a project (name, thumbnail, layersSnapshot).
+    Called by the auto-save debouncer in App.jsx. layersSnapshot is a JSON string
+    containing all layer canvasData, so it can be large — sent as a plain string to
+    avoid MongoDB schema migrations when the layer structure changes.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -2047,6 +2159,9 @@ async def save_project(project_id: str, payload: ProjectSave, current_user: dict
 
 @app.patch('/projects/{project_id}/rename')
 async def rename_project(project_id: str, payload: ProjectRename, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Rename a project. Performs the same case-insensitive conflict check as create/save,
+    but excludes the project being renamed from the conflict check (self-rename is allowed).
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -2074,6 +2189,7 @@ async def rename_project(project_id: str, payload: ProjectRename, current_user: 
 
 @app.delete('/projects/{project_id}')
 async def delete_project(project_id: str, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Permanently delete a project. Raises 404 if not found or not owned by the user."""
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")

@@ -1,3 +1,19 @@
+/**
+ * StylebendModal — blend two fashion images in StyleGAN-Human latent space.
+ *
+ * Workflow:
+ *   1. Upload two reference images (image1 pre-populated from the selected
+ *      reference layer via `initialImage1Url`).
+ *   2. Click Generate: calls /blend-styles which returns 21 pre-rendered
+ *      frames as base64 JPEGs (alpha 0 → 1 in 0.05 steps).
+ *   3. Drag the alpha slider to browse the interpolated frames instantly.
+ *   4. Optionally click Refine (SD img2img at low strength) to add fabric
+ *      texture and sharpness to the currently selected frame.
+ *   5. Apply sends the final image blob back to App.jsx.
+ *
+ * Each image optionally runs outpaint_to_full_body on the backend before
+ * GAN inversion when the source is a bust/half-body shot.
+ */
 import React, { useState } from 'react';
 import { X, SlidersHorizontal, ImagePlus, Sparkles, Wand2 } from 'lucide-react';
 import { blendStyles } from '../utils/imageProcessing';
@@ -92,13 +108,15 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
             };
 
             const progressInterval = simulateProgress();
+            // The backend returns 21 pre-rendered frames (alpha 0.0→1.0 in 0.05 steps).
             const allFrames = await blendStyles(image1, image2, alpha, outpaint1, outpaint2);
             clearInterval(progressInterval);
-            
+
             setProgress(100);
             setStatus('Done!');
-            
+
             setFrames(allFrames);
+            // Show the frame closest to the user's chosen alpha as the initial preview.
             const idx = Math.round(alpha * 20);
             setResultUrl(allFrames[Math.min(idx, allFrames.length - 1)]);
         } catch (err) {
@@ -115,13 +133,15 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
         setIsRefining(true);
         setStatus('Refining with Stable Diffusion...');
         try {
-            // Fetch the current result (base64 data URL) and convert to a blob
+            // The raw StyleGAN output looks "GAN-like" — slightly smoothed skin,
+            // soft fabric edges. A low-strength SD pass (0.35) adds realistic
+            // fabric texture and sharpens details without changing the outfit shape.
             const res = await fetch(resultUrl);
             const blob = await res.blob();
 
             const formData = new FormData();
             formData.append('image', blob, 'stylebend_result.png');
-            formData.append('strength', '0.35');
+            formData.append('strength', '0.35');  // low strength — preserve composition
 
             const refineRes = await fetch(`${API_BASE}/refine-stylebend`, {
                 method: 'POST',
@@ -142,7 +162,8 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
             onClose();
         } catch (err) {
             console.error('Refinement failed, applying unrefined result:', err);
-            // Fallback: apply original StyleGAN result without refinement
+            // If SD refinement is unavailable (backend down, OOM, etc.) still
+            // apply the raw StyleGAN frame so the user isn't left empty-handed.
             onApply(resultUrl);
             onClose();
         } finally {
@@ -252,6 +273,8 @@ const StylebendModal = ({ onClose, onApply, initialImage1Url }) => {
                                     const val = parseFloat(e.target.value);
                                     setAlpha(val);
                                     if (frames.length > 0) {
+                                        // 21 frames span 0.0→1.0 in 0.05 steps.
+                                        // Multiply by 20 to convert alpha to frame index.
                                         const idx = Math.round(val * 20);
                                         setResultUrl(frames[Math.min(idx, frames.length - 1)]);
                                     }

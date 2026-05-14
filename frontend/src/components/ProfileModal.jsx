@@ -1,18 +1,40 @@
+/**
+ * ProfileModal — user account settings sheet (tabbed: Profile | Password).
+ *
+ * Profile tab:
+ *   - Display name edit
+ *   - Avatar upload: resized client-side to 240×240 JPEG before sending to
+ *     avoid storing large images in MongoDB (avatarUrl is stored as a base64
+ *     data URL capped at ~180 KB on the backend).
+ *
+ * Password tab:
+ *   - Current password verification (Argon2 on backend)
+ *   - New password with confirmation match check (client-side before submit)
+ *   - Toggle visibility buttons for each field
+ *
+ * Backdrop click closes the modal. Success/error messages auto-clear after 3 s.
+ */
 import React, { useState, useRef } from 'react';
 import { X, Camera, Check, Lock, User, AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { updateProfile, changePassword } from '../services/auth';
 import './ProfileModal.css';
 
+/**
+ * Downscale an avatar file to at most maxPx × maxPx and encode as JPEG.
+ * Returns a base64 data URL. Keeps aspect ratio; never upscales.
+ */
 async function resizeImageToDataUrl(file, maxPx = 240) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
+      // Scale so the longest side is at most maxPx; never upscale (scale capped at 1).
       const scale = Math.min(maxPx / img.width, maxPx / img.height, 1);
       const w = Math.round(img.width * scale);
       const h = Math.round(img.height * scale);
       const cv = document.createElement('canvas');
       cv.width = w; cv.height = h;
       cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      // JPEG at 0.82 quality keeps the file under ~50 KB for most avatar photos.
       resolve(cv.toDataURL('image/jpeg', 0.82));
     };
     img.src = URL.createObjectURL(file);
@@ -55,6 +77,8 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
     setProfileSaving(true);
     setProfileMsg(null);
     try {
+      // Only send fields that actually changed to minimise payload size.
+      // avatarUrl is a large base64 JPEG (~180 KB) so we skip it unless new.
       const updates = {};
       if (displayName.trim() && displayName.trim() !== user?.displayName)
         updates.displayName = displayName.trim();
@@ -66,6 +90,7 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
       }
       const updated = await updateProfile(updates);
       onUserUpdate(updated);
+      // Clear staged avatar so clicking Save again doesn't re-upload the same data.
       setAvatarData(null);
       setProfileMsg({ type: 'ok', text: 'Profile saved successfully.' });
     } catch (err) {
@@ -76,6 +101,7 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
   };
 
   const handleChangePassword = async () => {
+    // Validate client-side first to give instant feedback without a round-trip.
     if (!currentPw) return setPwMsg({ type: 'err', text: 'Enter your current password.' });
     if (newPw.length < 8) return setPwMsg({ type: 'err', text: 'New password must be at least 8 characters.' });
     if (newPw !== confirmPw) return setPwMsg({ type: 'err', text: 'Passwords do not match.' });
@@ -84,6 +110,7 @@ const ProfileModal = ({ user, onClose, onUserUpdate }) => {
     try {
       await changePassword({ currentPassword: currentPw, newPassword: newPw });
       setPwMsg({ type: 'ok', text: 'Password updated successfully.' });
+      // Clear all fields on success so the form doesn't retain sensitive data.
       setCurrentPw(''); setNewPw(''); setConfirmPw('');
     } catch (err) {
       setPwMsg({ type: 'err', text: err.message || 'Failed to change password.' });

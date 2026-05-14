@@ -1,3 +1,26 @@
+/**
+ * ClothifyModal — UI for the Clothify AI pipeline.
+ *
+ * The modal manages two phases:
+ *   1. Generate: calls onGenerate({ layerId, prompt, blendStrength }) which
+ *      runs the Pix2Pix → composite → (optional) Stable Diffusion pipeline
+ *      in App.jsx and returns a preview data URL.
+ *   2. Apply: calls onApply(layerId, previewDataUrl) which replaces the
+ *      reference layer with the generated result and removes the drawing layer.
+ *
+ * Props:
+ *   layer        - The drawing layer being Clothified (for its id and name)
+ *   onClose      - Close the modal without applying
+ *   onApply      - Apply the generated preview to the reference layer
+ *   onGenerate   - Run the AI pipeline; returns a Promise<dataUrl>
+ *   progress     - 0-100 progress value reported by App.jsx during generation
+ *   status       - Human-readable status string shown in the progress bar
+ *
+ * blendStrength controls the Stable Diffusion influence:
+ *   0   = Pix2Pix only — fast, preserves original colors
+ *   0.75 = default — SD refines edges and textures
+ *   1.0 = full SD — maximum change, may drift from original composition
+ */
 import React, { useState } from 'react';
 import './ClothifyModal.css';
 import './ProgressBar.css';
@@ -18,6 +41,8 @@ const ClothifyModal = ({
     const handleGenerate = async () => {
         setIsGenerating(true);
         try {
+            // onGenerate is async and may take 10–60 seconds depending on
+            // blendStrength (0 = Pix2Pix only; >0 also runs Stable Diffusion).
             const result = await onGenerate({
                 layerId: layer.id,
                 prompt,
@@ -34,11 +59,14 @@ const ClothifyModal = ({
 
     const handleApply = () => {
         if (preview) {
+            // Delegate to App.jsx which replaces the reference layer and
+            // removes the drawing layer that was Clothified.
             onApply(layer.id, preview);
             onClose();
         }
     };
 
+    // Close the modal when the user clicks the dark overlay behind it.
     const handleOverlayClick = (e) => {
         if (e.target === e.currentTarget) {
             onClose();

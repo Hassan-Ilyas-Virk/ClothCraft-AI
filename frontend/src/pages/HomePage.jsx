@@ -8,8 +8,20 @@ import ClothCraftLogo from '../components/ClothCraftLogo';
 import ProfileModal from '../components/ProfileModal';
 import './HomePage.css';
 
-/* ── ProjectCard ──────────────────────────────────────────────────── */
-
+/**
+ * ProjectCard — a single project in the home page grid.
+ *
+ * Displays a thumbnail image (or empty state icon), project name, relative
+ * timestamp, and a context menu for rename / delete.
+ *
+ * The card's CSS glow color is derived dynamically from the thumbnail by
+ * downscaling it to 10x10 and averaging the most saturated, non-grey pixels.
+ * This creates a subtle ambient glow that matches each project's palette.
+ *
+ * Rename is handled inline: the name text switches to an input on click,
+ * then calls onRename on blur/Enter. Errors (e.g. duplicate name) are shown
+ * below the card.
+ */
 const ProjectCard = ({ project, onOpen, onDelete, onRename, onHover }) => {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -145,8 +157,16 @@ const NewProjectCard = ({ onClick }) => (
   </button>
 );
 
-/* ── Main ─────────────────────────────────────────────────────────── */
-
+/**
+ * HomePage — the project gallery shown after login.
+ *
+ * Renders a grid of ProjectCards plus a "New Design" creation card.
+ * Deletion shows a confirmation dialog before calling onDeleteProject.
+ * The ProfileModal is lazily mounted on demand (not always in the DOM).
+ *
+ * Projects are loaded by App.jsx before this component mounts; this page
+ * is purely presentational and does not fetch data itself.
+ */
 const HomePage = ({ user, projects, onNewProject, onOpenProject, onDeleteProject, onRenameProject, onLogout, onUserUpdate, isDark, onToggleDark }) => {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [showProfile, setShowProfile] = useState(false);

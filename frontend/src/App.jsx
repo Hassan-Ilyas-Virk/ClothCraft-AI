@@ -29,6 +29,34 @@ import {
     extractDoodle
 } from './utils/imageProcessing';
 
+/**
+ * App — root component and client-side router.
+ *
+ * View states (currentView):
+ *   'loading' — checking session on mount (renders null to avoid flash)
+ *   'login'   — unauthenticated; shows LoginPage
+ *   'home'    — authenticated; shows HomePage project gallery
+ *   'canvas'  — project open; shows the full canvas editor
+ *
+ * State management strategy:
+ *   - Layer state lives in useLayerManager (pure React state).
+ *   - Canvas pixel data lives in MultiLayerCanvas (imperative canvas elements).
+ *   - App.jsx is the bridge: it holds project metadata and coordinates
+ *     auto-save, hydration, and AI pipeline results between the two.
+ *
+ * Auto-save:
+ *   Two debounced timers (via useEffect + setTimeout) write to the backend:
+ *   - 3 s after any layer change (content-driven save)
+ *   - 1.2 s after canvas size changes (dimension-driven save)
+ *   Both are guarded by hydrationStateRef.ready to prevent saves during
+ *   project load (which would overwrite the just-restored state).
+ *
+ * Canvas hydration:
+ *   When a project is opened, the saved layersSnapshot is parsed and fed to
+ *   useLayerManager. Once the canvas DOM has mounted and reported the correct
+ *   dimensions (matching the saved canvasWidth/canvasHeight), hydrationStateRef
+ *   is marked ready and auto-save is unblocked.
+ */
 function App() {
     const canvasRef = useRef(null);
     const [isDark, toggleDark] = useDarkMode();
@@ -44,9 +72,14 @@ function App() {
     const [canvasNameError, setCanvasNameError] = useState('');
     const [savedCanvasSize, setSavedCanvasSize] = useState(null);
     const [currentCanvasSize, setCurrentCanvasSize] = useState({ width: 1024, height: 1024 });
+    /**
+     * Tracks canvas hydration for the currently-open project.
+     * ready: false = we are still restoring saved dimensions; block auto-save.
+     * targetSize:   the expected final dimensions; becomes null once matched.
+     */
     const hydrationStateRef = useRef({ projectId: null, ready: false, targetSize: null });
     const didInitialFitRef  = useRef(false); // prevent fitToScreen on every addLayer
-    const isCreatingProjectRef = useRef(false);
+    const isCreatingProjectRef = useRef(false); // mutex to prevent concurrent project creation
     // ───────────────────────────────────────────────────────────────────
 
     const {
@@ -84,7 +117,16 @@ function App() {
     const [liveMode, setLiveMode] = useState(false);
     const [showTextToClothes, setShowTextToClothes] = useState(false);
 
-    // Handle Spacebar Pan (Photoshop style)
+    /**
+     * Spacebar pan (Photoshop-style): hold Space to temporarily switch to the
+     * pan tool, release to restore the previous tool. Also handles global
+     * Ctrl/Cmd+Z (undo), Ctrl/Cmd+Shift+Z / Ctrl+Y (redo), and F (fit-to-screen).
+     *
+     * Guard conditions prevent these shortcuts from firing:
+     *   - When focus is inside a text input / textarea (user is typing)
+     *   - When a modal is open (clothifyLayer or patternLayer is set)
+     *   - When the canvas view is not active
+     */
     useEffect(() => {
         const isEditableTarget = (target) => {
             if (!target) return false;
@@ -149,6 +191,9 @@ function App() {
     }, [activeTool, previousTool, clothifyLayer, patternLayer, currentView]);
 
     // ── Auth check on mount ────────────────────────────────────────────
+    // On first render, check whether a valid JWT is already stored in localStorage.
+    // This restores the session without requiring the user to log in again.
+    // 'loading' is shown (blank screen) until the check completes.
     useEffect(() => {
         const loadSession = async () => {
             const user = await getUser();
@@ -173,7 +218,14 @@ function App() {
         }
     }, [currentView, currentUser]);
 
-    // Restore layers when a project is opened (key off project id so it only fires on project change)
+    /**
+     * Restore layers and canvas size when a project is opened.
+     * Keyed on currentProject.id so this effect fires only when the project
+     * actually changes (not on unrelated re-renders).
+     *
+     * Hydration is marked NOT ready here so auto-save is blocked until the
+     * canvas reports back that it has applied the correct dimensions.
+     */
     useEffect(() => {
         if (!currentProject) return;
         hydrationStateRef.current = { projectId: currentProject.id, ready: false, targetSize: null };
@@ -210,9 +262,14 @@ function App() {
         didInitialFitRef.current = false;
     }, [currentView, currentProject?.id]);
 
-    // Apply saved canvas dimensions after canvas mounts/layers load.
-    // layers.length stays in deps so this fires once the first layer arrives,
-    // but didInitialFitRef prevents it from re-running on every subsequent addLayer.
+    /**
+     * Apply saved canvas dimensions after the canvas DOM is ready and at least
+     * one layer is present (the canvas is not rendered when layers is empty).
+     *
+     * didInitialFitRef is a one-shot guard: once we've done the initial fit or
+     * size-restore for this project, we ignore subsequent layer additions so
+     * that adding a new layer doesn't snap the view back to fit-to-screen.
+     */
     useEffect(() => {
         if (currentView !== 'canvas') return;
         if (!canvasRef.current) return;
@@ -285,7 +342,13 @@ function App() {
         }
     }, [currentView, currentProject?.id, currentCanvasSize.width, currentCanvasSize.height]);
 
-    // Auto-save layers 3 s after the last change while on the canvas view
+    /**
+     * Auto-save 3 s after the last layer change.
+     * React's effect cleanup cancels the previous timer on every render,
+     * so only the timer from the most recent change actually fires (debounce).
+     * The hydration guard prevents saving immediately after project load,
+     * which would overwrite the just-restored snapshot with incomplete state.
+     */
     useEffect(() => {
         if (currentView !== 'canvas' || !currentProject) return;
         if (!hydrationStateRef.current.ready || hydrationStateRef.current.projectId !== currentProject.id) return;
@@ -293,7 +356,11 @@ function App() {
         return () => clearTimeout(tid);
     }, [layers]);
 
-    // Save canvas dimensions too, even when only size changes.
+    /**
+     * Auto-save 1.2 s after a canvas resize.
+     * Shorter delay than the layer auto-save because size changes are cheap
+     * (no layer data needs to be re-serialised) and users resize frequently.
+     */
     useEffect(() => {
         if (currentView !== 'canvas' || !currentProject) return;
         if (!hydrationStateRef.current.ready || hydrationStateRef.current.projectId !== currentProject.id) return;
@@ -336,7 +403,19 @@ function App() {
     };
 
     // ── Project handlers ──────────────────────────────────────────────
-    /** Internal: persist current state to storage */
+    /**
+     * Persist the current canvas state to the backend.
+     *
+     * Canvas size priority (from most to least authoritative):
+     *   1. Reference layer bounds (the true ground truth for size-pinned projects)
+     *   2. Live canvas size reported by MultiLayerCanvas
+     *   3. Hydration target size (the size we are still restoring to)
+     *   4. savedCanvasSize from the previous snapshot
+     *   5. 1024x1024 fallback
+     *
+     * showGlobalError=false is used by the name-commit path to show the error
+     * inline next to the title input rather than in the global error banner.
+     */
     const _saveProject = async (nameOverride, options = {}) => {
         const { showGlobalError = true } = options;
         if (!currentProject) return;
@@ -378,6 +457,11 @@ function App() {
         }
     };
 
+    /**
+     * Generate the next available "Untitled Design N" name that doesn't clash
+     * with any existing project names. Treats "Untitled Design" as slot 1 so
+     * the series is: Untitled Design, Untitled Design 2, Untitled Design 3, ...
+     */
     const buildNextUntitledName = (projects = []) => {
         const baseName = 'Untitled Design';
         const re = /^untitled design(?:\s+(\d+))?$/i;
@@ -402,6 +486,17 @@ function App() {
         return `${baseName} ${suffix}`;
     };
 
+    /**
+     * Create a new project with a unique "Untitled Design N" name.
+     *
+     * The retry loop handles a race condition when two tabs or browser windows
+     * create a project simultaneously: both may compute the same name, but only
+     * one POST will succeed. On a 409 conflict the loop fetches the latest
+     * project list to find the next available name and retries up to 6 times.
+     *
+     * isCreatingProjectRef acts as a mutex to prevent the user clicking
+     * "New Design" multiple times while the request is in-flight.
+     */
     const handleNewProject = async () => {
         if (isCreatingProjectRef.current) return;
         isCreatingProjectRef.current = true;
@@ -425,6 +520,7 @@ function App() {
                     const isNameConflict = /already exists/i.test(err?.message || '');
                     if (!isNameConflict) throw err;
 
+                    // Another concurrent creation used the same name — refresh and retry.
                     knownProjects = await projectService.getProjects();
                     setUserProjects(knownProjects);
                     projectName = buildNextUntitledName(knownProjects);
@@ -455,10 +551,15 @@ function App() {
         img.src = src;
     });
 
+    // Extract the authoritative canvas size from a raw layersSnapshot JSON string.
+    // Prefers the reference layer's bounds (most reliable) over the stored canvasWidth/Height,
+    // which may be stale if the image was replaced after the original save.
     const sanitizeSnapshotCanvasSize = (snapshotRaw) => {
         if (!snapshotRaw) return null;
         try {
             const parsed = JSON.parse(snapshotRaw);
+
+            // Priority 1: reference layer content bounds (actual pixel dimensions of the image).
             const refLayer = (parsed?.layers || []).find((l) => l?.type === 'reference');
             const bw = Number(refLayer?.bounds?.width);
             const bh = Number(refLayer?.bounds?.height);
@@ -466,19 +567,23 @@ function App() {
                 return { width: Math.round(bw), height: Math.round(bh) };
             }
 
+            // Priority 2: explicitly saved canvas dimensions.
             const cw = Number(parsed?.canvasWidth);
             const ch = Number(parsed?.canvasHeight);
             if (Number.isFinite(cw) && Number.isFinite(ch) && cw > 0 && ch > 0) {
                 return { width: Math.round(cw), height: Math.round(ch) };
             }
 
-            return null;
+            return null; // no reliable size found; caller will use the 1024×1024 default.
         } catch {
-            return null;
+            return null; // malformed JSON — treat as missing
         }
     };
 
     const normalizeLegacySnapshotSize = async (snapshotRaw) => {
+        // Legacy projects saved before the canvas-size field existed may have
+        // undefined/wrong dimensions. This function re-derives the canvas size
+        // from the reference layer so the project reopens at the correct resolution.
         if (!snapshotRaw) return snapshotRaw;
         try {
             const parsed = JSON.parse(snapshotRaw);
@@ -538,14 +643,18 @@ function App() {
         setUserProjects(projects);
     };
     const handleBackToHome = async () => {
+        // If the user navigates back without adding any content, silently delete the
+        // empty project so it doesn't pollute the home page with placeholder entries.
         const hasContent = layers.some(l => l.type === 'reference' || (l.type === 'drawing' && l.canvasData));
         if (!hasContent && currentProject) {
             try {
                 await projectService.deleteProject(currentProject.id);
             } catch (e) {
                 console.error('Failed to delete empty project', e);
+                // Non-fatal: continue to home even if the delete fails.
             }
         } else {
+            // Save before leaving so no work is lost.
             await _saveProject();
         }
         setCurrentView('home');
@@ -567,7 +676,11 @@ function App() {
     };
     // ──────────────────────────────────────────────────────────────────
 
-    // Handle reference image upload
+    /**
+     * Handle a reference image file picked from the upload input.
+     * Creates a 'reference' layer and loads the image into MultiLayerCanvas,
+     * which also resizes the canvas workspace to match the image dimensions.
+     */
     const handleImageUpload = (event) => {
         const file = event.target.files[0];
         if (file) {
@@ -575,10 +688,11 @@ function App() {
             reader.onload = (e) => {
                 const img = new Image();
                 img.onload = async () => {
-                    // Create reference layer
+                    // Add the reference layer first so its id is available before the blob is ready.
                     const refLayer = addLayer('reference', 'Reference');
 
-                    // Convert image to blob
+                    // We need a Blob to pass to loadImageToLayer (which calls canvas.toBlob internally),
+                    // so we round-trip through an off-screen canvas to get the raw pixel data.
                     const canvas = document.createElement('canvas');
                     canvas.width = img.width;
                     canvas.height = img.height;
@@ -587,7 +701,7 @@ function App() {
 
                     canvas.toBlob(async (blob) => {
                         if (canvasRef.current) {
-                            // Load image and resize canvas to fit it exactly (no borders)
+                            // shouldResizeCanvas=true: resize the workspace to match the image exactly.
                             await canvasRef.current.loadImageToLayer(refLayer.id, blob, true);
                         }
                     });
@@ -605,7 +719,7 @@ function App() {
         addLayer('drawing');
     };
 
-    // Handle layer selection
+    // Handle layer selection — locked layers are not selectable to prevent accidental edits.
     const handleLayerSelect = (layerId) => {
         const layer = layers.find(l => l.id === layerId);
         if (layer && !layer.locked) {
@@ -638,13 +752,25 @@ function App() {
         setClothifyLayer(null);
     };
 
-    // Handle generating preview in Clothify modal
+    /**
+     * Run the full Clothify AI pipeline for a drawing layer.
+     *
+     * Pipeline steps:
+     *   1. Export drawing layer as PNG blob.
+     *   2. Export reference layer as PNG blob.
+     *   3. Pix2Pix: translate the doodle into a realistic clothing texture.
+     *   4. Client-side composite: overlay the translated doodle onto the reference,
+     *      skipping Pix2Pix black-background pixels and feathering edges.
+     *   5. (If blendStrength > 0) Create a feathered binary mask from the doodle.
+     *   6. (If blendStrength > 0) Stable Diffusion img2img: refine within the mask.
+     *
+     * Returns a data URL of the final image for preview in the ClothifyModal.
+     */
     const handleGenerateClothify = async ({ layerId, prompt, blendStrength }) => {
         try {
             setClothifyProgress(0);
             setClothifyStatus('Preparing layers...');
             setIsProcessing(true);
-            console.log('🎨 Starting Clothify generation...');
 
             // Get the drawing layer blob
             setClothifyProgress(10);
@@ -724,25 +850,28 @@ function App() {
         }
     };
 
-    // Handle applying Clothify result
+    /**
+     * Apply an accepted Clothify result to the reference layer.
+     *
+     * The 50 ms setTimeout allows the ClothifyModal's close animation and
+     * React's state updates to settle before the canvas performs its drawing
+     * operation. Without the delay the canvas element may not yet be remounted
+     * after the modal unmounts, causing loadImageToLayer to silently no-op.
+     *
+     * The transform is reset to identity because loadImageToLayer bakes the
+     * previous transform into pixel coordinates; applying it again would
+     * double-shift or double-scale the image.
+     */
     const handleApplyClothify = async (layerId, previewDataUrl) => {
         try {
-            // Convert data URL to blob
             const response = await fetch(previewDataUrl);
             const blob = await response.blob();
-
-            // Update reference layer with the result
             const referenceLayer = getReferenceLayer();
-            
-            // We use a small timeout to let the UI settle before the canvas operation
-            // This ensures the internal canvas state is ready for drawing
+
             setTimeout(async () => {
                 if (canvasRef.current) {
                     await canvasRef.current.loadImageToLayer(referenceLayer.id, blob);
-                    
-                    // Force a re-render of the thumbnail and canvas state by giving it a fresh object URL
-                    // Ensure the layer's transform is reset to default so it isn't applied twice,
-                    // since canvasRef.current.getLayerBlob already bakes the transform into the pixels!
+
                     const freshUrl = URL.createObjectURL(blob);
                     updateLayer(referenceLayer.id, {
                         canvasData: freshUrl,
@@ -774,16 +903,15 @@ function App() {
         try {
             const baseName = patternLayer?.name || 'Pattern';
 
-            // Create a new layer with the pattern
             const res = await fetch(patternDataUrl);
             const blob = await res.blob();
 
-            // addLayer expects (type, name)
+            // Pattern is applied as a new drawing layer on top of the stack, not
+            // directly onto the source doodle layer, so the original artwork is preserved.
             const newLayer = addLayer('drawing', `${baseName} Pattern`);
 
-            // Update the layer with the blob data (as canvasData URL)
             updateLayer(newLayer.id, {
-                canvasData: patternDataUrl, // Use the URL directly, or create object URL from blob
+                canvasData: patternDataUrl,
                 thumbnail: patternDataUrl
             });
 
@@ -813,36 +941,35 @@ function App() {
 
     const handleApplyStylebend = async (resultUrl) => {
         try {
-            // Fetch the image to get a blob
             const res = await fetch(resultUrl);
             const blob = await res.blob();
-            
+
+            // Prefer the reference layer so the blended result replaces the current outfit photo.
             let targetLayer = getReferenceLayer();
-            
-            // If somehow there's no reference layer, fallback to active layer or the first layer
+
+            // If somehow there's no reference layer, fall back to active or first layer.
             if (!targetLayer && layers.length > 0) {
                 targetLayer = layers.find(l => l.id === activeLayerId) || layers[0];
             }
 
             if (targetLayer) {
-                // Use shouldResizeCanvas=false: the canvas is already sized to the reference image.
-                // We want the StyleGAN result to FIT inside existing canvas bounds, not resize the canvas.
+                // shouldResizeCanvas=false: canvas is already sized to the reference image;
+                // the StyleGAN result should fit inside it rather than resize the workspace.
                 setTimeout(async () => {
                     if (canvasRef.current) {
                         await canvasRef.current.loadImageToLayer(targetLayer.id, blob, false);
-                        
+
                         const freshUrl = URL.createObjectURL(blob);
                         updateLayer(targetLayer.id, {
                             canvasData: freshUrl,
                             thumbnail: freshUrl,
-                            // Standard reset transform
-                            transform: { x: 0, y: 0, scale: 1, rotation: 0 }
+                            transform: { x: 0, y: 0, scale: 1, rotation: 0 } // reset any previous transform
                         });
                     }
-                }, 50);
+                }, 50); // 50 ms lets the modal close and React re-render before canvas ops run
                 console.log('✅ Stylebend result applied to target layer');
             } else {
-                // Absolute fallback: create a new reference layer and resize canvas to image
+                // No layers at all — create a new reference layer and resize the canvas to fit.
                 const objectUrl = URL.createObjectURL(blob);
                 const newLayer = addLayer('reference', `Blended Style`);
                 setTimeout(async () => {
@@ -865,30 +992,30 @@ function App() {
 
     const handleApplyGenerateHuman = async (resultUrl) => {
         try {
-            // Fetch the generated AI image to get a blob
             const res = await fetch(resultUrl);
             const blob = await res.blob();
-            
+
             if (layers.length === 0) {
-                // If this is the first action, set as Reference Layer
+                // First image in the project — make it the reference layer and resize
+                // the workspace to match the generated image dimensions (512×768).
                 const refLayer = addLayer('reference', 'Generated Human');
                 const objectUrl = URL.createObjectURL(blob);
-                
-                // Wait for the new canvas instance to attach to the DOM
+
+                // 50 ms delay lets the new canvas element mount before we paint into it.
                 setTimeout(async () => {
                     if (canvasRef.current) {
+                        // shouldResizeCanvas=true so the canvas matches the 512×768 output.
                         await canvasRef.current.loadImageToLayer(refLayer.id, blob, true);
-                        // Manually trigger the canvasData update since the canvas size shifted
                         updateLayer(refLayer.id, {
                             canvasData: objectUrl,
                             thumbnail: objectUrl,
-                            // Reset transform
                             transform: { x: 0, y: 0, scale: 1, rotation: 0 }
                         });
                     }
                 }, 50);
             } else {
-                // Otherwise normal drawing layer
+                // Project already has layers — add the generated human as a drawing layer
+                // so the user can position it on top of an existing reference.
                 const objectUrl = URL.createObjectURL(blob);
                 const newLayer = addLayer('drawing', `Generated Human`);
                 updateLayer(newLayer.id, {
@@ -910,7 +1037,14 @@ function App() {
         setShowStylebend(true);
     };
 
-    // Convert reference clothing image into an editable doodle on a NEW drawing layer.
+    /**
+     * Convert the reference image into an editable flat-color doodle layer.
+     *
+     * Calls the /extract-doodle backend endpoint which uses rembg to remove
+     * the background and k-means quantization to reduce the image to N flat
+     * colors. The result is painted onto a new drawing layer so the user can
+     * immediately edit it and then run Clothify.
+     */
     const handleExtractDoodle = async (refLayer) => {
         try {
             if (!refLayer) return;
@@ -952,6 +1086,19 @@ function App() {
         }
     };
 
+    /**
+     * Merge a drawing layer down onto the layer immediately below it.
+     * Both layers must be drawing layers (the reference cannot be merged onto).
+     *
+     * The merge is done entirely client-side:
+     *   1. Draw the lower layer onto a temp canvas.
+     *   2. Draw the upper layer on top (applying its opacity and blend mode).
+     *   3. Update the lower layer with the merged pixel data.
+     *   4. Delete the upper layer.
+     *
+     * This is a destructive, non-undoable operation (the individual layer
+     * history stacks are discarded when the layer is deleted).
+     */
     const handleMergeDown = (layerId) => {
         const idx = layers.findIndex(l => l.id === layerId);
         if (idx <= 0) return;
@@ -980,12 +1127,13 @@ function App() {
                 img.src = canvasData;
             });
 
+        // Draw lower first, then upper on top (respecting its blend mode + opacity).
         drawLayer({ canvasData: lower.canvasData, opacity: lower.opacity ?? 1, blendMode: 'source-over' })
             .then(() => drawLayer({ canvasData: upper.canvasData, opacity: upper.opacity ?? 1, blendMode: upper.blendMode || 'source-over' }))
             .then(() => {
                 const mergedData = temp.toDataURL('image/png');
 
-                // Generate thumbnail
+                // Generate thumbnail at 480px to match what MultiLayerCanvas uses.
                 const SZ = 480;
                 const thumbCanvas = document.createElement('canvas');
                 thumbCanvas.width = SZ;
@@ -1012,8 +1160,12 @@ function App() {
         try {
             const res = await fetch(resultUrl);
             const blob = await res.blob();
+            // Text-to-Clothes always modifies the reference layer in-place so the
+            // drawing layers (doodles, patterns) remain correctly aligned on top.
             const referenceLayer = getReferenceLayer();
             if (!referenceLayer) return;
+            // 50ms delay ensures the modal's close animation has finished and the
+            // canvas is in its idle state before we write new pixel data to it.
             setTimeout(async () => {
                 if (canvasRef.current) {
                     await canvasRef.current.loadImageToLayer(referenceLayer.id, blob, false);

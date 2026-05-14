@@ -1,29 +1,59 @@
+/**
+ * useLayerManager — central state for the layer stack.
+ *
+ * Owns the entire layers array and the active layer ID. All mutations go
+ * through the callbacks returned here; no component writes to layers directly.
+ *
+ * Layer shape:
+ * {
+ *   id:        string  — "layer-<timestamp>-<random9chars>"
+ *   name:      string
+ *   type:      'reference' | 'drawing'
+ *   visible:   boolean
+ *   locked:    boolean  — reference layers start locked
+ *   thumbnail: string   — 480x480 data URL for the layers panel preview
+ *   canvasData:string   — full-resolution PNG data URL or object URL
+ *   opacity:   number   — 0.0 to 1.0
+ *   blendMode: string   — CSS globalCompositeOperation value
+ *   transform: { x, y, scale, rotation }
+ * }
+ *
+ * Stack ordering convention:
+ *   layers[0] = reference image (pinned at the bottom of the visual stack)
+ *   layers[1..n] = drawing layers rendered on top, in ascending z-order
+ */
 import { useState, useCallback } from 'react';
 
-/**
- * Custom hook for managing layers in the drawing application
- */
 export const useLayerManager = () => {
   const [layers, setLayers] = useState([]);
   const [activeLayerId, setActiveLayerId] = useState(null);
 
-  // Add a new layer
+  /**
+   * Create a new layer and push it onto the top of the stack.
+   * Returns the new layer object synchronously so callers can immediately
+   * use its id (e.g. to load an image onto it via MultiLayerCanvas).
+   *
+   * NOTE: addLayer depends on layers.length so its reference changes whenever
+   * the stack grows. Callers that hold a stale closure (e.g. setTimeout) must
+   * read the latest version from state, not capture the callback at mount time.
+   */
   const addLayer = useCallback((type = 'drawing', name = null) => {
     const newLayer = {
+      // Use timestamp + random suffix to guarantee uniqueness even when
+      // multiple layers are added within the same millisecond.
       id: `layer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       name: name || `Layer ${layers.length + 1}`,
       type, // 'reference' or 'drawing'
       visible: true,
-      locked: type === 'reference', // Default to locked for reference, but allow unlocking
+      locked: type === 'reference', // Reference images start locked to prevent accidental edits.
       thumbnail: null,
       canvasData: null,
       opacity: 1.0,
-      blendMode: 'source-over', // Default blend mode
-      transform: { x: 0, y: 0, scale: 1, rotation: 0 } // Add transform state
+      blendMode: 'source-over', // CSS globalCompositeOperation; matches canvas default.
+      transform: { x: 0, y: 0, scale: 1, rotation: 0 }
     };
-    
+
     setLayers(prev => [...prev, newLayer]);
-    // Always set active, even for reference if added manually (though usually ref is first)
     setActiveLayerId(newLayer.id);
     return newLayer;
   }, [layers.length]);
@@ -59,24 +89,26 @@ export const useLayerManager = () => {
     ));
   }, []);
 
-  // Reorder layers
+  /**
+   * Move a layer from fromIndex to toIndex in the layers array.
+   * The reference layer (index 0) is immovable; drawing layers cannot be
+   * placed below it. The UI calls this after a drag-and-drop reorder.
+   */
   const reorderLayers = useCallback((fromIndex, toIndex) => {
     setLayers(prev => {
       const newLayers = [...prev];
-      
-      // Prevent moving the reference layer (assuming it's always at index 0)
+
+      // The reference layer is always pinned at the bottom of the stack.
       if (newLayers[fromIndex].type === 'reference') return prev;
-      
-      // Prevent moving anything below the reference layer (index 0)
-      // If we try to move to index 0, move to index 1 instead
+
+      // Clamp the target to above the reference layer.
       const targetIndex = newLayers[toIndex]?.type === 'reference' ? 1 : toIndex;
-      
-      // If trying to move to 0 and 0 is reference, we already handled it. 
-      // But if we are just swapping, we need to be careful.
-      // Actually, let's just say index 0 is reserved for reference if it exists.
       const hasReference = newLayers.some(l => l.type === 'reference');
       if (hasReference && targetIndex === 0) return prev;
 
+      // Remove the layer from its current position and re-insert at the target.
+      // The insertion index shifts by -1 when moving downward because the
+      // splice(fromIndex, 1) shortens the array before the insert position.
       const [movedLayer] = newLayers.splice(fromIndex, 1);
       const insertionIndex = fromIndex < targetIndex ? targetIndex - 1 : targetIndex;
       newLayers.splice(insertionIndex, 0, movedLayer);
@@ -184,9 +216,12 @@ export const useLayerManager = () => {
   }, []);
 
   /**
-   * Replace all layers at once — used when opening a saved project.
-   * @param {array}       newLayers
-   * @param {string|null} newActiveId
+   * Replace the entire layer stack at once — used when opening a saved project.
+   * Falls back to activating the first layer if the saved active ID is absent,
+   * which handles legacy projects created before activeLayerId was persisted.
+   *
+   * @param {Array}       newLayers   - Layers deserialized from layersSnapshot
+   * @param {string|null} newActiveId - Previously active layer ID
    */
   const loadAllLayers = useCallback((newLayers, newActiveId) => {
     setLayers(newLayers || []);

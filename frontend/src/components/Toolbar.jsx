@@ -1,3 +1,22 @@
+/**
+ * Toolbar — vertical left-side tool palette.
+ *
+ * Renders the drawing tool buttons, undo/redo, live-preview toggle,
+ * the colour picker, and the moodboard palette swatches (when extracted).
+ *
+ * Tool groups (separated by dividers in the UI):
+ *   - Drawing: Brush, Eraser
+ *   - View:    Pan
+ *   - Selection: Select (marquee), Lasso (freehand)
+ *   - Shapes:  Rectangle, Circle, Text
+ *   - Other:   Transform, Zoom
+ *   - History: Undo, Redo
+ *   - AI:      Live Preview toggle
+ *   - Colour:  Moodboard extractor, colour picker, moodboard swatches
+ *
+ * The `disabled` prop is true while an AI pipeline is running (isProcessing)
+ * or when no layer is active, preventing tool switches that could corrupt state.
+ */
 import React from 'react';
 import {
     Paintbrush,
@@ -32,6 +51,11 @@ const Toolbar = ({
     liveMode,
     onLiveModeToggle,
 }) => {
+    /**
+     * Tool definitions. The `hint` string is shown in the hint bar below the
+     * toolbar so users can discover keyboard shortcuts and interaction patterns.
+     * Dividers are rendered after index 2 (after Pan) and index 6 (after Text).
+     */
     const tools = [
         { id: 'brush',        icon: Paintbrush,          label: 'Brush',     hint: 'Drag to paint' },
         { id: 'eraser',       icon: Eraser,              label: 'Eraser',    hint: 'Drag to erase pixels' },
@@ -63,6 +87,8 @@ const Toolbar = ({
                             <IconComponent size={18} strokeWidth={2} />
                             <span className="toolbar-tool-tooltip">{tool.label}</span>
                         </button>
+                        {/* index 2 = after Pan (separates draw/view from selection)
+                            index 6 = after Text (separates shapes from transform/zoom) */}
                         {(index === 2 || index === 6) && <div className="toolbar-divider" />}
                     </React.Fragment>
                 );

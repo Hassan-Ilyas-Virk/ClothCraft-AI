@@ -1,3 +1,15 @@
+/**
+ * GenerateHumanModal — generate a full-body fashion model image from text.
+ *
+ * Calls /generate-human (SD txt2img at 512×768) with a user-supplied prompt.
+ * Gender selection prepends the gender descriptor to the prompt so it
+ * overrides the model's default gender associations.
+ * Preset buttons fill the prompt textarea with common fashion archetypes for
+ * quick starts. Advanced options expose inference steps and CFG guidance scale
+ * for users who want finer control over the generation.
+ * Result background is removed (rembg) on the backend and replaced with solid
+ * white, ready to use as a reference layer.
+ */
 import React, { useState } from 'react';
 import { X, Sparkles, User, SlidersHorizontal } from 'lucide-react';
 import { generateHuman } from '../utils/imageProcessing';
@@ -33,6 +45,9 @@ const GenerateHumanModal = ({ onClose, onApply }) => {
         try {
             let finalPrompt = prompt;
             if (gender !== 'any') {
+                // Inject gender as early in the prompt as possible — SD weighs
+                // tokens at the front more heavily, so placing it here prevents
+                // the default neutral gender association from competing.
                 if (finalPrompt.toLowerCase().startsWith('a fashion model')) {
                     finalPrompt = finalPrompt.replace(/a fashion model/i, `a ${gender} fashion model`);
                 } else {
@@ -53,6 +68,7 @@ const GenerateHumanModal = ({ onClose, onApply }) => {
 
     const handleApply = () => {
         if (resultUrl && onApply) {
+            // Pass the object URL to App.jsx which loads it as the reference layer.
             onApply(resultUrl);
             onClose();
         }

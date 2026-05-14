@@ -1,3 +1,11 @@
+/**
+ * DoubleImageCropperModal — crop two images side-by-side before Stylebend.
+ *
+ * Used by StylebendModal to let the user align each image (zoom, pan, crop)
+ * before sending them to the /blend-styles endpoint. react-easy-crop handles
+ * the interactive crop UI; getCroppedImg bakes the crop region onto an offscreen
+ * canvas and returns the JPEG blob for upload.
+ */
 import React, { useState, useCallback } from 'react';
 import Cropper from 'react-easy-crop';
 import { X, Check } from 'lucide-react';
@@ -18,21 +26,18 @@ async function getCroppedImg(imageSrc, pixelCrop) {
 
     if (!ctx) return null;
 
-    canvas.width = pixelCrop.width;
+    // Output canvas exactly matches the crop area to preserve the 1:2 aspect ratio.
+    canvas.width  = pixelCrop.width;
     canvas.height = pixelCrop.height;
 
+    // Copy only the selected rectangle from the source; dest fills the whole canvas.
     ctx.drawImage(
         image,
-        pixelCrop.x,
-        pixelCrop.y,
-        pixelCrop.width,
-        pixelCrop.height,
-        0,
-        0,
-        pixelCrop.width,
-        pixelCrop.height
+        pixelCrop.x, pixelCrop.y, pixelCrop.width, pixelCrop.height,
+        0, 0, pixelCrop.width, pixelCrop.height
     );
 
+    // Return as JPEG — both images will be sent to /blend-styles which expects JPEG.
     return new Promise((resolve, reject) => {
         canvas.toBlob((file) => {
             if (file) resolve(file);
@@ -56,8 +61,10 @@ const DoubleImageCropperModal = ({ imageUrl1, imageUrl2, onClose, onCropComplete
         if (!croppedAreaPixels1 || !croppedAreaPixels2) return;
         setIsCropping(true);
         try {
+            // Crop both images concurrently — they are independent canvas operations.
             const croppedBlob1 = await getCroppedImg(imageUrl1, croppedAreaPixels1);
             const croppedBlob2 = await getCroppedImg(imageUrl2, croppedAreaPixels2);
+            // Pass both blobs to StylebendModal which uploads them to /blend-styles.
             onCropComplete(croppedBlob1, croppedBlob2);
         } catch (e) {
             console.error(e);

@@ -1,3 +1,38 @@
+/**
+ * MultiLayerCanvas — the core multi-layer painting canvas.
+ *
+ * Architecture overview:
+ *   - Each layer in the `layers` prop gets its own <canvas> element, all
+ *     stacked at the same absolute position inside a wrapper div.
+ *   - An additional transparent "overlay" canvas sits on top (z-index 100)
+ *     for live shape/selection previews and transform handles. It is never
+ *     read as pixel data and is cleared/redrawn on every relevant state change.
+ *   - The wrapper div is transformed (translate + scale) for pan/zoom without
+ *     touching the canvas pixel data, keeping canvasData coordinates stable.
+ *
+ * Coordinate systems:
+ *   - "Canvas space" = pixel coordinates on the canvas element (0..canvasSize).
+ *   - "Wrapper space" = canvas space + layer transform (translate + scale).
+ *   - "Container space" = wrapper space scaled by viewScale and offset by viewOffset.
+ *   - getMousePos() converts from container (clientX/Y) to wrapper space.
+ *   - Layer local = (wrapper - transform.x) / transform.scale
+ *
+ * History (undo/redo):
+ *   Per-layer history stacks live in historyRef (never in React state to avoid
+ *   re-renders). recordHistoryStep() snapshots canvasData + bounds + transform
+ *   before each destructive operation. Max 40 steps per layer.
+ *
+ * Floating selection (transform tool):
+ *   After the user creates a selection and clicks inside/on a corner handle,
+ *   the selected pixels are extracted to floatingSelRef.canvas and erased from
+ *   the layer. The overlay shows the floating pixels during drag/resize.
+ *   commitFloat() paints them back at their new position; cancelFloat() restores
+ *   the original pixels (currently only called on Escape).
+ *
+ * Imperative handle (exposed via useImperativeHandle):
+ *   Parent (App.jsx) calls methods like getLayerBlob, loadImageToLayer,
+ *   fitToScreen, setCanvasSize, undoActiveLayer, redoActiveLayer.
+ */
 import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle, useCallback } from 'react';
 import './DrawingCanvas.css';
 
@@ -11,25 +46,28 @@ const MultiLayerCanvas = forwardRef(({
     onCanvasSizeChange,
     onHistoryStateChange
 }, ref) => {
-    const containerRef = useRef(null);
-    const wrapperRef = useRef(null);
-    const canvasRefs = useRef({});
+    const containerRef = useRef(null);     // outer scroll/overflow container
+    const wrapperRef = useRef(null);       // inner div that is scaled/translated for pan+zoom
+    const canvasRefs = useRef({});         // { [layerId]: React.createRef() } map
     const [isDrawing, setIsDrawing] = useState(false);
     const [canvasSize, setCanvasSize] = useState({ width: 1024, height: 1024 });
-    const [viewScale, setViewScale] = useState(1); // View zoom level
-    const [viewOffset, setViewOffset] = useState({ x: 0, y: 0 }); // View pan offset
-    const [cursorPos, setCursorPos] = useState({ x: -100, y: -100 }); // Cursor position for brush indicator
+    const [viewScale, setViewScale] = useState(1);               // zoom multiplier
+    const [viewOffset, setViewOffset] = useState({ x: 0, y: 0 }); // pan offset in px
+    const [cursorPos, setCursorPos] = useState({ x: -100, y: -100 }); // for the brush ring indicator
 
-    // Transform state
-    const [transformState, setTransformState] = useState(null); // { mode: 'move' | 'resize' | 'pan', ... }
+    // Tracks the current mouse interaction mode: pan, move, resize, float-move, float-resize.
+    const [transformState, setTransformState] = useState(null);
 
-    // Overlay canvas for shape/selection previews
+    // Overlay canvas: live previews (shapes, selection marquee, transform handles).
+    // Pixel data here is never committed to any layer.
     const overlayCanvasRef = useRef(null);
-    // In-progress mouse operation: shape drag, selection drag, lasso draw
+    // Tracks the in-progress mouse drag before it is committed (shape, selection, lasso).
     const operationRef = useRef(null);
-    // Committed selection: { type:'rect', x, y, w, h } | { type:'lasso', points:[] }
+    // The most recently committed selection region.
+    // { type:'rect', x, y, w, h } | { type:'lasso', points:[] }
     const selectionRef = useRef(null);
-    // Floating selection during transform (extract → drag → commit)
+    // Floating selection: pixels extracted from the layer during a transform-tool drag.
+    // { canvas: HTMLCanvasElement, sel, tx, ty, sx, sy }
     const floatingSelRef = useRef(null);
     // Text tool input state — canvasFontSize is kept in sync with box height
     const [textInput, setTextInput] = useState({ visible: false, x: 0, y: 0, value: '', canvasX: 0, canvasY: 0, width: 200, height: 60, canvasFontSize: 24 });
@@ -78,7 +116,8 @@ const MultiLayerCanvas = forwardRef(({
         };
     }, []);
 
-    // Initialize canvases for all layers
+    // Pre-create React refs for any new layer that doesn't yet have one.
+    // canvasRefs is a plain object (not state) so this does not cause a re-render.
     useEffect(() => {
         layers.forEach(layer => {
             if (!canvasRefs.current[layer.id]) {
@@ -280,6 +319,12 @@ const MultiLayerCanvas = forwardRef(({
         ctx.restore();
     };
 
+    /**
+     * Convert a pointer event from screen (clientX/Y) to wrapper-space pixel
+     * coordinates. Wrapper space = canvas pixels + layer CSS transform; it is
+     * the common coordinate system used by all drawing and selection logic.
+     * Handles both mouse and touch events via the same code path.
+     */
     const getMousePos = (e) => {
         if (!wrapperRef.current) return { x: 0, y: 0 };
 
@@ -330,6 +375,14 @@ const MultiLayerCanvas = forwardRef(({
         return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
     };
 
+    /**
+     * Compute the bounding box of all non-transparent pixels on a canvas.
+     * Used to track the actual content area of a layer (stored in layer.bounds)
+     * so the transform tool can draw accurate handles even for layers with
+     * lots of empty (alpha=0) canvas space around the content.
+     *
+     * Returns null when the canvas is entirely transparent (empty layer).
+     */
     const getContentBounds = (canvas) => {
         const ctx = canvas.getContext('2d');
         const width = canvas.width;
@@ -363,6 +416,12 @@ const MultiLayerCanvas = forwardRef(({
         };
     };
 
+    /**
+     * Capture the current visual state of a layer into a plain object.
+     * Snapshots are used both for the undo/redo stack and as the unit of
+     * data returned by applyLayerSnapshot. Storing transform with the
+     * pixel data ensures undo restores both at the same time.
+     */
     const createLayerSnapshot = (layerId) => {
         const canvasEl = canvasRefs.current[layerId]?.current;
         const layer = layers.find((l) => l.id === layerId);
@@ -375,6 +434,11 @@ const MultiLayerCanvas = forwardRef(({
         };
     };
 
+    /**
+     * Downscale a data URL to a 480×480 thumbnail (letter-boxed).
+     * Used for the async path inside applyLayerSnapshot where we need the
+     * thumbnail before calling onLayerUpdate to keep the layers panel in sync.
+     */
     const buildThumbnailFromData = (data) => {
         return new Promise((resolve) => {
             const SZ = 480;
@@ -397,6 +461,11 @@ const MultiLayerCanvas = forwardRef(({
         });
     };
 
+    /**
+     * Notify the parent of whether undo/redo is currently available for the
+     * active layer. Called after every history mutation so the toolbar buttons
+     * stay in sync with the actual stack state.
+     */
     const emitHistoryState = useCallback((layerId = activeLayerId) => {
         if (typeof onHistoryStateChange !== 'function') return;
         if (!layerId) {
@@ -411,6 +480,13 @@ const MultiLayerCanvas = forwardRef(({
         });
     }, [activeLayerId, onHistoryStateChange]);
 
+    /**
+     * Snapshot the current canvas pixels and layer transform before a
+     * destructive operation (drawing stroke, shape commit, delete, etc.).
+     * The snapshot is pushed onto the undo stack; the redo stack is cleared
+     * because a new action always invalidates any existing redo states.
+     * The undo stack is capped at MAX_HISTORY_STEPS to limit memory usage.
+     */
     const recordHistoryStep = (layerId) => {
         if (!layerId) return;
         const snapshot = createLayerSnapshot(layerId);
@@ -423,12 +499,19 @@ const MultiLayerCanvas = forwardRef(({
         const layerHistory = historyRef.current[layerId];
         layerHistory.undo.push(snapshot);
         if (layerHistory.undo.length > MAX_HISTORY_STEPS) {
+            // Drop the oldest step to stay within the memory budget.
             layerHistory.undo.shift();
         }
         layerHistory.redo = [];
         emitHistoryState(layerId);
     };
 
+    /**
+     * Paint a snapshot back onto the layer canvas and sync the React layer
+     * state (canvasData, thumbnail, bounds, transform). Called by both
+     * undoLayer and redoLayer — async because thumbnail generation involves
+     * an Image load.
+     */
     const applyLayerSnapshot = async (layerId, snapshot) => {
         const canvasEl = canvasRefs.current[layerId]?.current;
         if (!canvasEl || !snapshot) return;
@@ -455,6 +538,11 @@ const MultiLayerCanvas = forwardRef(({
         });
     };
 
+    /**
+     * Pop the most recent undo snapshot, push the current state onto the
+     * redo stack, and restore the previous state. The current state is
+     * captured first so that redo can return to exactly this point.
+     */
     const undoLayer = async (layerId) => {
         if (!layerId || !historyRef.current[layerId]?.undo.length) return;
         const currentSnapshot = createLayerSnapshot(layerId);
@@ -467,6 +555,10 @@ const MultiLayerCanvas = forwardRef(({
         emitHistoryState(layerId);
     };
 
+    /**
+     * Pop the top redo snapshot, push current state back onto undo, and
+     * restore the next state. Symmetric inverse of undoLayer.
+     */
     const redoLayer = async (layerId) => {
         if (!layerId || !historyRef.current[layerId]?.redo.length) return;
         const currentSnapshot = createLayerSnapshot(layerId);
@@ -487,6 +579,11 @@ const MultiLayerCanvas = forwardRef(({
         overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
     };
 
+    /**
+     * Redraw the overlay for a live in-progress drag (not yet committed).
+     * Called on every mousemove while operationRef.current is set.
+     * Handles: rect selection marquee, lasso path, shape-rect, shape-circle.
+     */
     const drawOverlayPreview = () => {
         const overlay = overlayCanvasRef.current;
         if (!overlay || !operationRef.current) return;
@@ -543,6 +640,10 @@ const MultiLayerCanvas = forwardRef(({
         ctx.restore();
     };
 
+    /**
+     * Draw a committed selection (marching-ants border + tint fill) on the
+     * overlay canvas. Used for tools other than transform — no handles needed.
+     */
     const drawSelectionOnOverlay = (sel) => {
         const overlay = overlayCanvasRef.current;
         if (!overlay) return;
@@ -611,7 +712,11 @@ const MultiLayerCanvas = forwardRef(({
         ctx.restore();
     };
 
-    // Returns the axis-aligned bounding box of any selection shape (canvas pixel coords)
+    /**
+     * Returns the axis-aligned bounding box of any selection shape in canvas-
+     * pixel (overlay) coordinates. Used to position corner resize handles for
+     * both the committed selection and the floating selection overlay.
+     */
     const getSelBounds = (sel) => {
         if (!sel) return null;
         if (sel.type === 'rect') return { x: sel.x, y: sel.y, w: sel.w, h: sel.h };
@@ -626,7 +731,12 @@ const MultiLayerCanvas = forwardRef(({
         return null;
     };
 
-    // Render the in-flight floating selection on the overlay canvas (with scale + corner handles)
+    /**
+     * Repaint the overlay with the in-flight floating selection pixels at
+     * their current translation (tx/ty) and scale (sx/sy), plus a dashed
+     * border and corner resize handles. Called imperatively on every drag
+     * move so the overlay stays consistent between React renders.
+     */
     const renderFloatOnOverlay = () => {
         const float = floatingSelRef.current;
         const overlay = overlayCanvasRef.current;
@@ -696,7 +806,12 @@ const MultiLayerCanvas = forwardRef(({
         }
     };
 
-    // Paste the floating selection onto the active layer at its final position+scale, then clear the float
+    /**
+     * Stamp the floating selection onto the active layer at its current
+     * position and scale, then tear down the float state. This is the normal
+     * end-of-transform path (Escape key, tool switch, or clicking outside).
+     * A history step is recorded so the user can undo the paste.
+     */
     const commitFloat = () => {
         const float = floatingSelRef.current;
         if (!float || !activeLayerId) return;
@@ -724,7 +839,12 @@ const MultiLayerCanvas = forwardRef(({
         updateLayerThumbnail(activeLayerId);
     };
 
-    // Cancel float: restore pixels at their original position
+    /**
+     * Restore the floating pixels back to their original position (no move/
+     * resize applied). Currently called only if cancelFloat() is triggered
+     * programmatically; Escape instead calls commitFloat() to keep any partial
+     * move rather than discarding it entirely.
+     */
     const cancelFloat = () => {
         const float = floatingSelRef.current;
         if (!float || !activeLayerId) return;
@@ -737,7 +857,12 @@ const MultiLayerCanvas = forwardRef(({
         updateLayerThumbnail(activeLayerId);
     };
 
-    // Returns a Path2D clipping region in layer-local coordinate space.
+    /**
+     * Build a Path2D clip region in layer-local pixel coordinates from a
+     * selection that is stored in canvas/wrapper space. The layer transform t
+     * (translate + uniform scale) converts between the two spaces.
+     * Used by draw() and commitShape() to confine strokes to the selection.
+     */
     // sel coords are in canvas space; we convert using the layer transform t.
     const applySelectionClipPath = (sel, t) => {
         const path = new Path2D();
@@ -760,7 +885,11 @@ const MultiLayerCanvas = forwardRef(({
         return path;
     };
 
-    // Commits a completed shape drag to the active layer canvas
+    /**
+     * Bake a completed shape drag (rect or ellipse) into the active layer
+     * canvas. Coordinates in op are wrapper-space; we convert to layer-local
+     * before drawing. If a selection is active the shape is clipped to it.
+     */
     const commitShape = (op) => {
         if (!activeLayerId) return;
         const canvasEl = canvasRefs.current[activeLayerId]?.current;
@@ -802,7 +931,12 @@ const MultiLayerCanvas = forwardRef(({
         updateLayerThumbnail(activeLayerId);
     };
 
-    // Commits typed text to the active layer canvas
+    /**
+     * Render the text overlay content onto the active layer canvas.
+     * canvasX/canvasY are already in layer-local coordinates (converted
+     * when the text input was placed in startDrawing). Multiline text is
+     * split on '\n' and drawn line-by-line with 1.2× line-height spacing.
+     */
     const commitTextToLayer = (text, canvasX, canvasY, fontSize) => {
         if (!activeLayerId || !text.trim()) return;
         const canvasEl = canvasRefs.current[activeLayerId]?.current;
@@ -831,6 +965,25 @@ const MultiLayerCanvas = forwardRef(({
 
     // ─────────────────────────────────────────────────────────────────────────
 
+    /**
+     * Mouse/touch-down dispatcher — the entry point for every interaction.
+     *
+     * Priority order:
+     *   1. Commit pending text if the click is outside the text overlay.
+     *   2. Spacebar pan (temporary pan regardless of active tool).
+     *   3. Pan tool — start view panning.
+     *   4. Zoom tool — zoom in/out around the click point.
+     *   5. Guard: no active layer or layer is locked → bail out.
+     *   6. Transform tool:
+     *      a. If a float is active → interact with float (resize handle / move / commit).
+     *      b. If a selection is active → lift selection into a float (move or resize).
+     *      c. Otherwise → interact with layer-level transform handles (move / resize).
+     *   7. Brush / eraser — record a history step, then start freehand drawing.
+     *   8. Select — start rectangular marquee.
+     *   9. Lasso — start freehand marquee.
+     *  10. Shape tools — start drag-to-draw.
+     *  11. Text tool — show the resizable text input at the click position.
+     */
     const startDrawing = (e) => {
         if (activeTool !== 'transform' && (transformState?.mode === 'move' || transformState?.mode === 'resize')) {
             setTransformState(null);
@@ -1123,6 +1276,15 @@ const MultiLayerCanvas = forwardRef(({
         }
     };
 
+    /**
+     * Mouse/touch-up handler — finalise any in-progress operation.
+     *
+     * - Float drag/resize: clear transformState but keep the float alive so the
+     *   user can make further adjustments before committing with Escape.
+     * - Other transform states (move/resize/pan): simply clear.
+     * - Shape/select/lasso: commit the completed drag to a selection or layer.
+     * - Brush/eraser: end the stroke, compute final bounds, sync thumbnail.
+     */
     const stopDrawing = () => {
         // End floating selection drag/resize without committing — float stays active for further adjustments
         if (transformState?.mode === 'float-move' || transformState?.mode === 'float-resize') {
@@ -1191,6 +1353,17 @@ const MultiLayerCanvas = forwardRef(({
         }
     };
 
+    /**
+     * Mouse/touch-move handler — routes to the correct in-progress operation.
+     *
+     * Priority (mirrors startDrawing):
+     *   pan          → update viewOffset
+     *   float-move   → translate float.tx / float.ty and repaint overlay
+     *   float-resize → compute new sx/sy/tx/ty from anchor geometry, repaint
+     *   move/resize  → update layer.transform via onLayerUpdate
+     *   select/lasso/shape → update operationRef and call drawOverlayPreview
+     *   brush/eraser → lineTo on the active layer canvas
+     */
     const draw = (e) => {
         // Handle View Panning
         if (transformState?.mode === 'pan') {
@@ -1375,6 +1548,12 @@ const MultiLayerCanvas = forwardRef(({
         }
     };
 
+    /**
+     * Flatten the layer's CSS transform (translate + scale) into its pixel
+     * data so the canvas element can return to identity (0, 0, scale=1).
+     * Called automatically when the user switches away from the transform tool.
+     * Skipped when the transform is already identity to avoid unnecessary work.
+     */
     const bakeLayerTransform = (layerId) => {
         const layer = layers.find(l => l.id === layerId);
         // Read from stored canvasData, NOT from the DOM canvas.
@@ -1424,6 +1603,12 @@ const MultiLayerCanvas = forwardRef(({
         emitHistoryState(activeLayerId);
     }, [activeLayerId, emitHistoryState]);
 
+    /**
+     * Re-generate the 480×480 layer thumbnail from the current canvas pixels
+     * and call onLayerUpdate so the layers panel stays in sync. Also recomputes
+     * content bounds (for accurate transform handles on the next render).
+     * Accepts an optional pre-computed data URL to avoid a redundant toDataURL.
+     */
     const updateLayerThumbnail = (layerId, newCanvasData) => {
         const canvasRef = canvasRefs.current[layerId];
         if (canvasRef && canvasRef.current) {
@@ -1455,6 +1640,19 @@ const MultiLayerCanvas = forwardRef(({
         }
     };
 
+    /**
+     * Imperative API exposed to App.jsx via the forwarded ref.
+     *
+     * getLayerCanvas    — direct access to the DOM <canvas> (for pixel reads)
+     * getLayerBlob      — layer pixels baked with transform as a PNG Blob
+     * loadImageToLayer  — draw an image blob onto a layer; optionally resize canvas
+     * fitToScreen       — scale + center the view so the canvas fills 90% of container
+     * setCanvasSize     — resize all layer canvases; pass autoFit=true to fit afterward
+     * getCanvasSize     — current { width, height }
+     * undoActiveLayer   — pop undo stack for the currently active layer
+     * redoActiveLayer   — pop redo stack for the currently active layer
+     * canUndoActiveLayer / canRedoActiveLayer — boolean stack availability checks
+     */
     useImperativeHandle(ref, () => ({
         getLayerCanvas: (layerId) => canvasRefs.current[layerId]?.current,
 

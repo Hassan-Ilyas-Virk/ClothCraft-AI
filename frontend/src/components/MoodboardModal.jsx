@@ -1,3 +1,16 @@
+/**
+ * MoodboardModal — extract or AI-generate a colour palette to paint with.
+ *
+ * Two modes:
+ *   Upload  — user drops/picks an image; dominant colours are extracted
+ *             client-side using k-means quantization (extractDominantColors).
+ *   AI      — user types a mood/aesthetic description; calls /suggest-colors
+ *             which returns a 5-swatch PNG based on HSL colour theory.
+ *
+ * The resulting palette is rendered as clickable swatches. Clicking a swatch
+ * and then pressing Apply calls onApply(hexColor) so App.jsx can set the
+ * active brush colour.
+ */
 import React, { useState, useRef } from 'react';
 import { extractDominantColors, suggestColors, blobToImage } from '../utils/imageProcessing';
 import { 
@@ -39,13 +52,15 @@ const MoodboardModal = ({ onClose, onApply }) => {
         reader.onload = (event) => {
             const img = new Image();
             img.onload = () => {
-                setImage(img.src);
+                setImage(img.src); // show upload preview in the modal
+                // Run k-means colour quantization client-side — no API call needed.
                 const extracted = extractDominantColors(img, 4);
                 setColors(extracted);
                 setIsProcessing(false);
             };
             img.src = event.target.result;
         };
+        // ReadAsDataURL is the simplest way to get a displayable src from a File object.
         reader.readAsDataURL(file);
     };
 
@@ -58,10 +73,13 @@ const MoodboardModal = ({ onClose, onApply }) => {
         setIsProcessing(true);
         setStatus('AI is analyzing the aesthetic...');
         try {
+            // Backend returns a 5-swatch PNG strip (not an arbitrary image).
             const blob = await suggestColors(prompt);
             setStatus('Distilling palette...');
-            
-            // Use blob only for color extraction — DO NOT show the raw palette strip PNG
+
+            // We extract hex colours from the PNG strip via k-means rather than
+            // displaying the raw strip, so the UI looks consistent with the
+            // upload flow (clickable swatch chips, not an image thumbnail).
             const img = await blobToImage(blob);
             const extracted = extractDominantColors(img, 4);
             setColors(extracted);

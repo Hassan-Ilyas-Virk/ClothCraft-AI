@@ -1,3 +1,19 @@
+/**
+ * TextToClothesModal — replace a specific garment on the reference layer
+ * using SegFormer-based inpainting via /text-to-clothes.
+ *
+ * Workflow:
+ *   1. User types a garment description (e.g. "red silk dress") and optionally
+ *      uses the chip buttons to build the prompt quickly.
+ *   2. Generate: sends the reference canvasData + prompt to /text-to-clothes.
+ *      The backend detects the garment type, builds a pixel-accurate SegFormer
+ *      mask, and runs masked-latent SD inpainting on the garment region only.
+ *   3. Preview comparison: toggle "Before/After" to compare with the original.
+ *   4. Apply: passes the result blob back to App.jsx to load onto the layer.
+ *
+ * `strength` (0.5–1.0) controls how much SD deviates from the reference;
+ * higher values allow more garment creativity but may alter pose/face.
+ */
 import React, { useState } from 'react';
 import { Wand2, RotateCcw, Info } from 'lucide-react';
 import API_BASE, { NGROK_HEADERS } from '../config.js';
@@ -15,6 +31,7 @@ const TextToClothesModal = ({ referenceLayer, onClose, onApply }) => {
     const [showOriginal, setShowOriginal] = useState(false);
 
     const appendChip = (chip) => {
+        // Append chip to the prompt with a comma separator, or start fresh if empty.
         setPrompt(prev => {
             const trimmed = prev.trim();
             return trimmed ? `${trimmed}, ${chip}` : chip;
@@ -28,12 +45,15 @@ const TextToClothesModal = ({ referenceLayer, onClose, onApply }) => {
         setPreview(null);
         setShowOriginal(false);
         try {
+            // Fetch the reference layer's current pixel data as a blob.
+            // canvasData may be an object URL or data URL — fetch handles both.
             const res = await fetch(referenceLayer.canvasData);
             const referenceBlob = await res.blob();
 
             const formData = new FormData();
             formData.append('reference', referenceBlob, 'reference.png');
             formData.append('prompt', prompt.trim());
+            // strength controls how much SD deviates from the reference (0.5–1.0).
             formData.append('strength', strength.toString());
 
             setStatus('Generating clothing…');
@@ -46,6 +66,7 @@ const TextToClothesModal = ({ referenceLayer, onClose, onApply }) => {
             if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
             const blob = await response.blob();
+            // Store as an object URL so the <img> can display it before Apply is clicked.
             setPreview(URL.createObjectURL(blob));
             setStatus('');
         } catch (err) {
@@ -58,11 +79,13 @@ const TextToClothesModal = ({ referenceLayer, onClose, onApply }) => {
 
     const handleApply = () => {
         if (preview) {
+            // Pass the object URL to App.jsx; it will load the blob onto the reference layer.
             onApply(preview);
             onClose();
         }
     };
 
+    // Close on backdrop click so the user doesn't need to reach the Cancel button.
     const handleOverlayClick = (e) => {
         if (e.target === e.currentTarget) onClose();
     };

@@ -1,3 +1,16 @@
+/**
+ * Iridescence — animated WebGL background effect for the login page.
+ *
+ * Renders a full-viewport OGL (WebGL) canvas with a GLSL fragment shader that
+ * produces a looping iridescent colour wave. The effect responds to mouse
+ * position (uMouse) and accepts props for base colour, wave amplitude, and
+ * animation speed.
+ *
+ * The canvas is positioned behind all other content via CSS (position:absolute,
+ * z-index:-1) so it doesn't intercept pointer events.
+ * ResizeObserver keeps the renderer dimensions in sync with the container.
+ * RAF loop is started on mount and cancelled on unmount to avoid memory leaks.
+ */
 import { Renderer, Program, Mesh, Color, Triangle } from 'ogl';
 import { useEffect, useRef } from 'react';
 
