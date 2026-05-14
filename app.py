@@ -124,6 +124,17 @@ def serialize_project(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def serialize_project_summary(doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(doc["_id"]),
+        "userId": doc["userId"],
+        "name": doc["name"],
+        "createdAt": doc["createdAt"],
+        "updatedAt": doc["updatedAt"],
+        "thumbnail": doc.get("thumbnail"),
+    }
+
+
 def serialize_user(doc: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(doc["_id"]),
@@ -1972,8 +1983,11 @@ async def list_projects(current_user: dict[str, Any] = Depends(get_current_user)
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
 
-    cursor = mongo.db["projects"].find({"userId": str(current_user["_id"])}).sort("updatedAt", DESCENDING)
-    items = [serialize_project(doc) async for doc in cursor]
+    cursor = mongo.db["projects"].find(
+        {"userId": str(current_user["_id"])},
+        projection={"layersSnapshot": 0},
+    ).sort("updatedAt", DESCENDING)
+    items = [serialize_project_summary(doc) async for doc in cursor]
     return JSONResponse(items)
 
 

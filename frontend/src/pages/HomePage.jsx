@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Sparkles, Plus, LogOut, Trash2, FolderOpen,
   PenLine, Clock, MoreVertical, ImageIcon, Settings, Moon, Sun
@@ -17,16 +17,7 @@ const ProjectCard = ({ project, onOpen, onDelete, onRename, onHover }) => {
   const [renameError, setRenameError] = useState('');
   const nameInputRef = useRef(null);
 
-  const thumbSrc = useMemo(() => {
-    if (project.layersSnapshot) {
-      try {
-        const { layers } = JSON.parse(project.layersSnapshot);
-        const ref = layers?.find(l => l.type === 'reference' && l.canvasData);
-        if (ref?.canvasData) return ref.canvasData;
-      } catch { }
-    }
-    return project.thumbnail || null;
-  }, [project.layersSnapshot, project.thumbnail]);
+  const thumbSrc = project.thumbnail || null;
 
   const [glowColor, setGlowColor] = useState('rgba(139,92,246,0.75)');
   useEffect(() => {
