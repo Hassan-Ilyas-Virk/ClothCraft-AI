@@ -10,7 +10,7 @@ import './LoginPage.css';
 
 const IRIDESCENCE_COLOR = [0.77, 0.52, 0.99];
 
-const LoginPage = ({ onLogin, onSignup }) => {
+const LoginPage = ({ onLogin, onSignup, onGuest }) => {
   const [mode, setMode]           = useState('login'); // 'login' | 'signup'
   const [email, setEmail]         = useState('');
   const [password, setPassword]   = useState('');
@@ -153,7 +153,7 @@ const LoginPage = ({ onLogin, onSignup }) => {
           </form>
 
 
-          <button className="login-guest-btn" type="button">
+          <button className="login-guest-btn" type="button" onClick={onGuest}>
             Continue as guest
             <ArrowRight size={18} />
           </button>

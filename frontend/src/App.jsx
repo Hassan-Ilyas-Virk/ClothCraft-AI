@@ -205,7 +205,7 @@ function App() {
 
     // Refresh project list when arriving on the home view
     useEffect(() => {
-        if (currentView === 'home' && currentUser) {
+        if (currentView === 'home' && currentUser && !currentUser.guest) {
             const loadProjects = async () => {
                 try {
                     const projects = await projectService.getProjects();
@@ -392,6 +392,10 @@ function App() {
     const handleSignup = async (email, password, name) => {
         const user = await authSignup(email, password, name);
         setCurrentUser(user);
+        setCurrentView('home');
+    };
+    const handleGuestLogin = () => {
+        setCurrentUser({ displayName: 'Guest', email: '', guest: true });
         setCurrentView('home');
     };
     const handleLogout = async () => {
@@ -1186,7 +1190,7 @@ function App() {
     // ── Conditional routing renders ────────────────────────────────────
     if (currentView === 'loading') return null;
     if (currentView === 'login') return (
-        <LoginPage onLogin={handleLogin} onSignup={handleSignup} />
+        <LoginPage onLogin={handleLogin} onSignup={handleSignup} onGuest={handleGuestLogin} />
     );
     if (currentView === 'home') return (
         <HomePage
