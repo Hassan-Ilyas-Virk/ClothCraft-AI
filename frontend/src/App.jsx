@@ -422,7 +422,7 @@ function App() {
      */
     const _saveProject = async (nameOverride, options = {}) => {
         const { showGlobalError = true } = options;
-        if (!currentProject) return;
+        if (!currentProject || currentProject.guest) return;
         const name = (nameOverride || canvasName || '').trim() || 'Untitled Design';
         const thumbnail = layers.find(l => l.thumbnail)?.thumbnail || null;
         const liveCanvasSize = canvasRef.current?.getCanvasSize?.();
@@ -502,6 +502,19 @@ function App() {
      * "New Design" multiple times while the request is in-flight.
      */
     const handleNewProject = async () => {
+        // Guest users get a local-only project with no backend persistence.
+        if (currentUser?.guest) {
+            const guestId = `guest_${Date.now()}`;
+            const guestProj = { id: guestId, name: 'Untitled Design', guest: true };
+            hydrationStateRef.current = { projectId: guestId, ready: true, targetSize: null };
+            setCurrentProject(guestProj);
+            setCanvasName(guestProj.name);
+            setSavedCanvasSize(null);
+            loadAllLayers([], null);
+            setCurrentView('canvas');
+            return;
+        }
+
         if (isCreatingProjectRef.current) return;
         isCreatingProjectRef.current = true;
         try {
@@ -647,6 +660,13 @@ function App() {
         setUserProjects(projects);
     };
     const handleBackToHome = async () => {
+        // Guest projects are local-only — skip all backend calls.
+        if (currentProject?.guest) {
+            setCurrentProject(null);
+            loadAllLayers([], null);
+            setCurrentView('home');
+            return;
+        }
         // If the user navigates back without adding any content, silently delete the
         // empty project so it doesn't pollute the home page with placeholder entries.
         const hasContent = layers.some(l => l.type === 'reference' || (l.type === 'drawing' && l.canvasData));
