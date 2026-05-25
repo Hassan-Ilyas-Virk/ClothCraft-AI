@@ -90,6 +90,7 @@ MONGODB_CORS_ORIGINS = [
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-change-me")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "cc_auth")
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
 AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "lax")
@@ -300,6 +301,10 @@ class UpdateProfileRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     currentPassword: str = Field(min_length=1, max_length=128)
     newPassword: str = Field(min_length=8, max_length=128)
+
+
+class GoogleAuthRequest(BaseModel):
+    credential: str  # Google ID token from GIS
 
 
 @asynccontextmanager
@@ -2009,12 +2014,67 @@ async def auth_me(current_user: dict[str, Any] = Depends(get_current_user)):
     return JSONResponse(serialize_user(current_user))
 
 
+@app.post('/auth/google')
+async def google_auth(payload: GoogleAuthRequest):
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=501, detail="Google login is not configured")
+    mongo: MongoManager = app.state.mongo
+    if mongo.db is None:
+        raise HTTPException(status_code=503, detail="Database is not connected")
+
+    from google.oauth2 import id_token
+    from google.auth.transport import requests as g_requests
+    try:
+        id_info = id_token.verify_oauth2_token(
+            payload.credential,
+            g_requests.Request(),
+            GOOGLE_CLIENT_ID,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid Google token: {exc}") from exc
+
+    google_id = id_info["sub"]
+    email = id_info.get("email", "").lower().strip()
+    display_name = id_info.get("name") or id_info.get("given_name") or email.split("@")[0]
+    avatar_url = id_info.get("picture")
+
+    # Find existing user by googleId first, then fall back to email
+    user_doc = await mongo.db["users"].find_one({"googleId": google_id})
+    if user_doc is None:
+        user_doc = await mongo.db["users"].find_one({"email": email})
+
+    now_ms = utc_timestamp_ms()
+    if user_doc is None:
+        # New user — create account
+        new_doc = {
+            "email": email,
+            "displayName": display_name,
+            "avatarUrl": avatar_url,
+            "googleId": google_id,
+            "createdAt": now_ms,
+            "updatedAt": now_ms,
+        }
+        result = await mongo.db["users"].insert_one(new_doc)
+        user_doc = await mongo.db["users"].find_one({"_id": result.inserted_id})
+    else:
+        # Existing user — link Google ID and refresh avatar if needed
+        updates: dict[str, Any] = {"googleId": google_id, "updatedAt": now_ms}
+        if avatar_url and not user_doc.get("avatarUrl"):
+            updates["avatarUrl"] = avatar_url
+        await mongo.db["users"].update_one({"_id": user_doc["_id"]}, {"$set": updates})
+        user_doc = await mongo.db["users"].find_one({"_id": user_doc["_id"]})
+
+    token = create_access_token(str(user_doc["_id"]))
+    response = JSONResponse({"user": serialize_user(user_doc), "token": token})
+    set_auth_cookie(response, token)
+    return response
+
+
 @app.patch('/auth/profile')
 async def update_profile(
     payload: UpdateProfileRequest,
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
-    """Update display name and/or avatar. avatarUrl is a base64 data URL capped at ~180 KB."""
     mongo: MongoManager = app.state.mongo
     updates: dict[str, Any] = {"updatedAt": utc_timestamp_ms()}
     if payload.displayName is not None:
@@ -2036,9 +2096,6 @@ async def change_password(
     payload: ChangePasswordRequest,
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
-    """Verify the current password before replacing the hash with the new one.
-    Argon2id is used for both verification and re-hashing.
-    """
     try:
         password_hasher.verify(current_user["passwordHash"], payload.currentPassword)
     except (VerifyMismatchError, InvalidHash):

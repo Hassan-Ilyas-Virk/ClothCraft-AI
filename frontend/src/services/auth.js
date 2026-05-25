@@ -66,10 +66,6 @@ export async function isAuthenticated() {
   return !!user;
 }
 
-/**
- * Update the current user's display name and/or avatar.
- * Only fields that are explicitly provided (non-undefined) are sent.
- */
 export async function updateProfile({ displayName, avatarUrl }) {
   const body = {};
   if (displayName !== undefined) body.displayName = displayName;
@@ -80,13 +76,18 @@ export async function updateProfile({ displayName, avatarUrl }) {
   });
 }
 
-/**
- * Change the current user's password.
- * Requires the existing password as confirmation before accepting the new one.
- */
 export async function changePassword({ currentPassword, newPassword }) {
   return await apiRequest('/auth/change-password', {
     method: 'POST',
     body: JSON.stringify({ currentPassword, newPassword }),
   });
+}
+
+export async function googleLogin(credential) {
+  const data = await apiRequest('/auth/google', {
+    method: 'POST',
+    body: JSON.stringify({ credential }),
+  });
+  if (data?.token) tokenStore.set(data.token);
+  return data?.user ?? data;
 }

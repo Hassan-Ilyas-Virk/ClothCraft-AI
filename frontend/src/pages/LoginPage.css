@@ -86,6 +86,34 @@
 }
 
 /* Google Button */
+.login-google-btn-wrap {
+  position: relative;
+  width: 100%;
+  margin-bottom: 24px;
+}
+
+.login-google-btn-wrap .login-google-btn {
+  margin-bottom: 0;
+  pointer-events: none; /* overlay div handles clicks */
+}
+
+/* Transparent overlay of Google's rendered button — covers our styled button */
+.login-google-overlay {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+/* Make the GIS iframe fill the overlay */
+.login-google-overlay > div,
+.login-google-overlay iframe {
+  width: 100% !important;
+  height: 100% !important;
+}
+
 .login-google-btn {
   display: flex;
   align-items: center;

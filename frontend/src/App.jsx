@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Sparkles, X, ImagePlus, SlidersHorizontal, ChevronLeft, PenLine, Home, Moon, Sun } from 'lucide-react';
 import { useDarkMode } from './hooks/useDarkMode';
-import { getUser, login as authLogin, signup as authSignup, logout as authLogout } from './services/auth';
+import { getUser, login as authLogin, signup as authSignup, logout as authLogout, googleLogin as authGoogleLogin } from './services/auth';
 import * as projectService from './services/projects';
 import LoginPage from './pages/LoginPage';
 import HomePage from './pages/HomePage';
@@ -394,8 +394,9 @@ function App() {
         setCurrentUser(user);
         setCurrentView('home');
     };
-    const handleGuestLogin = () => {
-        setCurrentUser({ displayName: 'Guest', email: '', guest: true });
+    const handleGoogleLogin = async (credential) => {
+        const user = await authGoogleLogin(credential);
+        setCurrentUser(user);
         setCurrentView('home');
     };
     const handleLogout = async () => {
@@ -1210,7 +1211,7 @@ function App() {
     // ── Conditional routing renders ────────────────────────────────────
     if (currentView === 'loading') return null;
     if (currentView === 'login') return (
-        <LoginPage onLogin={handleLogin} onSignup={handleSignup} onGuest={handleGuestLogin} />
+        <LoginPage onLogin={handleLogin} onSignup={handleSignup} onGoogleLogin={handleGoogleLogin} />
     );
     if (currentView === 'home') return (
         <HomePage
