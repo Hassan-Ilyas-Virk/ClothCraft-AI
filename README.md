@@ -1,10 +1,9 @@
+# ClothCraft AI
+
 <div align="center">
+<img src="img/c.jpg" alt="Clothify Demo" width="800"/>
 
-# Clothify
 
-### Sketch it. AI makes it real.
-
-**Turn rough clothing doodles into photorealistic fashion — powered by AI.**
 
 `Pix2Pix` `Realistic Vision` `StyleGAN` `React` `FastAPI`
 
@@ -46,6 +45,51 @@ Draw a rough sketch on a human figure. Clothify's AI pipeline transforms it into
 | **Generate Human** | Create base figures from text prompts |
 | **Extract Doodle** | Convert photos back to editable flat-color sketches |
 | **Multi-Layer Canvas** | Full editor with brush, eraser, shapes, text, lasso, transform, undo/redo |
+
+---
+
+## Screenshots
+
+Here are some of the features in action:
+
+<table>
+  <tr>
+    <td align="center">
+      <strong>Clothify Pipeline</strong><br/>
+      <em>Turn a doodle into a realistic outfit.</em>
+    </td>
+    <td align="center">
+      <strong>Text to Clothes</strong><br/>
+      <em>Generate clothing from a text prompt.</em>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <img src="img/1.jpg" alt="Clothify Pipeline Example"/>
+    </td>
+    <td>
+      <img src="img/2.jpg" alt="Text to Clothes Example"/>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Stylebend</strong><br/>
+      <em>Blend two outfits together.</em>
+    </td>
+    <td align="center">
+      <strong>Model Generator</strong><br/>
+      <em>Create base figures from text prompts.</em>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <img src="img/3.jpg" alt="Stylebend Example"/>
+    </td>
+    <td>
+      <img src="img/4.jpg" alt="Model Generator Example"/>
+    </td>
+  </tr>
+</table>
 
 ---
 
