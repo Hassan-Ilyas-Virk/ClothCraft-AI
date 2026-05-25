@@ -1,25 +1,28 @@
 # Backend
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-python-multipart==0.0.9
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
 motor>=3.1.1
-python-dotenv==1.0.1
-argon2-cffi==23.1.0
-python-jose[cryptography]==3.3.0
-email-validator==2.2.0
+python-dotenv>=1.0.1
+argon2-cffi>=23.1.0
+python-jose[cryptography]>=3.3.0
+email-validator>=2.2.0
 pymongo>=4.0
 google-auth>=2.29.0
 
+# Install torch with CUDA 12.1 support (RTX 3070 / driver 580+):
+# pip install torch==2.2.2+cu121 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+Pillow>=10.1.0
+numpy>=1.24.3
+diffusers>=0.25.0
+transformers>=4.36.0
+accelerate>=0.25.0 
+safetensors>=0.4.1
 
-# torch & torchvision installed separately — see README for CPU-only install command
-Pillow==10.1.0
-numpy==1.24.3
-diffusers==0.25.0
-transformers==4.36.0
-accelerate==0.25.0
-safetensors==0.4.1
-
-# Stylebend integration
+# Stylebend / image processing
 lpips==0.1.4
 opencv-python
 scikit-image
+rembg
+facenet-pytorch
+

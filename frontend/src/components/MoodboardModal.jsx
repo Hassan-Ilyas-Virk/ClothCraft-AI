@@ -1,3 +1,16 @@
+/**
+ * MoodboardModal — extract or AI-generate a colour palette to paint with.
+ *
+ * Two modes:
+ *   Upload  — user drops/picks an image; dominant colours are extracted
+ *             client-side using k-means quantization (extractDominantColors).
+ *   AI      — user types a mood/aesthetic description; calls /suggest-colors
+ *             which returns a 5-swatch PNG based on HSL colour theory.
+ *
+ * The resulting palette is rendered as clickable swatches. Clicking a swatch
+ * and then pressing Apply calls onApply(hexColor) so App.jsx can set the
+ * active brush colour.
+ */
 import React, { useState, useRef } from 'react';
 import { extractDominantColors, suggestColors, blobToImage } from '../utils/imageProcessing';
 import { 
@@ -15,12 +28,13 @@ import {
 import './MoodboardModal.css';
 
 const MoodboardModal = ({ onClose, onApply }) => {
-    const [image, setImage] = useState(null);
+    const [image, setImage] = useState(null);       // Only set for uploaded images
     const [colors, setColors] = useState([]);
     const [prompt, setPrompt] = useState('');
     const [status, setStatus] = useState('');
     const [isProcessing, setIsProcessing] = useState(false);
     const [activeOption, setActiveOption] = useState(null); // 'upload' or 'ai'
+    const [aiDone, setAiDone] = useState(false);    // True after successful AI generation
     const fileInputRef = useRef(null);
 
     const handleImageUpload = (e) => {
@@ -38,28 +52,38 @@ const MoodboardModal = ({ onClose, onApply }) => {
         reader.onload = (event) => {
             const img = new Image();
             img.onload = () => {
-                setImage(img.src);
+                setImage(img.src); // show upload preview in the modal
+                // Run k-means colour quantization client-side — no API call needed.
                 const extracted = extractDominantColors(img, 4);
                 setColors(extracted);
                 setIsProcessing(false);
             };
             img.src = event.target.result;
         };
+        // ReadAsDataURL is the simplest way to get a displayable src from a File object.
         reader.readAsDataURL(file);
     };
 
     const handleAISuggest = async () => {
         if (!prompt) return;
         setActiveOption('ai');
+        setAiDone(false);
+        setImage(null);   // Clear any previous upload preview
+        setColors([]);
         setIsProcessing(true);
         setStatus('AI is analyzing the aesthetic...');
         try {
+            // Backend returns a 5-swatch PNG strip (not an arbitrary image).
             const blob = await suggestColors(prompt);
             setStatus('Distilling palette...');
+
+            // We extract hex colours from the PNG strip via k-means rather than
+            // displaying the raw strip, so the UI looks consistent with the
+            // upload flow (clickable swatch chips, not an image thumbnail).
             const img = await blobToImage(blob);
-            setImage(img.src);
             const extracted = extractDominantColors(img, 4);
             setColors(extracted);
+            setAiDone(true);
         } catch (error) {
             console.error('AI Suggestion failed:', error);
             alert('AI color suggestion failed. Please try again.');
@@ -157,8 +181,9 @@ const MoodboardModal = ({ onClose, onApply }) => {
                         <div className="section-title">Analysis & Palette</div>
                         
                         <div className="preview-container">
-                            {image ? (
-                                <>
+                            {/* Uploaded image — show the actual photo */}
+                            {activeOption === 'upload' && image && (
+                                <div style={{ position: 'relative' }}>
                                     <img src={image} alt="Source" className="main-preview-v2" />
                                     {isProcessing && (
                                         <div className="loading-overlay">
@@ -166,8 +191,28 @@ const MoodboardModal = ({ onClose, onApply }) => {
                                             <span>{status}</span>
                                         </div>
                                     )}
-                                </>
-                            ) : (
+                                </div>
+                            )}
+
+                            {/* AI processing spinner */}
+                            {activeOption === 'ai' && isProcessing && (
+                                <div className="empty-state">
+                                    <div className="moodboard-spinner-v2" style={{ margin: '0 auto 12px' }}></div>
+                                    <p>{status}</p>
+                                </div>
+                            )}
+
+                            {/* AI success — show a clean generated badge instead of raw PNG */}
+                            {activeOption === 'ai' && aiDone && !isProcessing && (
+                                <div className="empty-state" style={{ gap: '8px' }}>
+                                    <Sparkles size={40} style={{ color: 'var(--accent, #7c3aed)', opacity: 0.85 }} />
+                                    <p style={{ fontWeight: 600, margin: 0 }}>Palette generated for</p>
+                                    <p style={{ color: 'var(--accent, #7c3aed)', fontWeight: 700, margin: 0, fontSize: '1rem' }}>"{prompt}"</p>
+                                </div>
+                            )}
+
+                            {/* Default empty state */}
+                            {!activeOption && (
                                 <div className="empty-state">
                                     <MousePointerClick size={48} className="pulse-icon" />
                                     <p>Choose a source on the left to extract its color profile</p>

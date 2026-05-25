@@ -1,11 +1,24 @@
+/**
+ * GenerateHumanModal — generate a full-body fashion model image from text.
+ *
+ * Calls /generate-human (SD txt2img at 512×768) with a user-supplied prompt.
+ * Gender selection prepends the gender descriptor to the prompt so it
+ * overrides the model's default gender associations.
+ * Preset buttons fill the prompt textarea with common fashion archetypes for
+ * quick starts. Advanced options expose inference steps and CFG guidance scale
+ * for users who want finer control over the generation.
+ * Result background is removed (rembg) on the backend and replaced with solid
+ * white, ready to use as a reference layer.
+ */
 import React, { useState } from 'react';
 import { X, Sparkles, User, SlidersHorizontal } from 'lucide-react';
 import { generateHuman } from '../utils/imageProcessing';
 
 const GenerateHumanModal = ({ onClose, onApply }) => {
     const [prompt, setPrompt] = useState('');
+    const [gender, setGender] = useState('any');
     const [negativePrompt, setNegativePrompt] = useState('');
-    const [steps, setSteps] = useState(50);
+    const [steps, setSteps] = useState(35);
     const [guidance, setGuidance] = useState(7.5);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -30,7 +43,19 @@ const GenerateHumanModal = ({ onClose, onApply }) => {
         setResultUrl(null);
 
         try {
-            const blob = await generateHuman(prompt, negativePrompt, steps, guidance);
+            let finalPrompt = prompt;
+            if (gender !== 'any') {
+                // Inject gender as early in the prompt as possible — SD weighs
+                // tokens at the front more heavily, so placing it here prevents
+                // the default neutral gender association from competing.
+                if (finalPrompt.toLowerCase().startsWith('a fashion model')) {
+                    finalPrompt = finalPrompt.replace(/a fashion model/i, `a ${gender} fashion model`);
+                } else {
+                    finalPrompt = `a photorealistic ${gender} model, ` + finalPrompt;
+                }
+            }
+
+            const blob = await generateHuman(finalPrompt, negativePrompt, steps, guidance);
             const url = URL.createObjectURL(blob);
             setResultUrl(url);
         } catch (err) {
@@ -43,6 +68,7 @@ const GenerateHumanModal = ({ onClose, onApply }) => {
 
     const handleApply = () => {
         if (resultUrl && onApply) {
+            // Pass the object URL to App.jsx which loads it as the reference layer.
             onApply(resultUrl);
             onClose();
         }
@@ -65,15 +91,47 @@ const GenerateHumanModal = ({ onClose, onApply }) => {
                         </div>
                     )}
 
+                    {/* Gender Selection */}
+                    <div className="clothify-setting-group" style={{ marginBottom: '16px' }}>
+                        <label className="clothify-setting-label" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                            <User size={16} /> Model Type
+                        </label>
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                            {['any', 'female', 'male'].map((g) => (
+                                <button
+                                    key={g}
+                                    type="button"
+                                    onClick={() => setGender(g)}
+                                    style={{
+                                        flex: 1,
+                                        padding: '10px 12px',
+                                        borderRadius: '8px',
+                                        border: gender === g ? '2px solid #8b5cf6' : '1px solid #d1d5db',
+                                        background: gender === g ? '#f5f3ff' : 'white',
+                                        color: gender === g ? '#6d28d9' : '#4b5563',
+                                        fontWeight: gender === g ? '600' : '500',
+                                        cursor: 'pointer',
+                                        textTransform: 'capitalize',
+                                        transition: 'all 0.2s',
+                                        outline: 'none',
+                                    }}
+                                    disabled={isGenerating}
+                                >
+                                    {g}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
                     {/* Prompt Input */}
                     <div className="clothify-setting-group">
                         <label className="clothify-setting-label" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                            <User size={16} /> Describe the outfit
+                            <Sparkles size={16} /> Describe the outfit
                         </label>
                         <textarea
                             value={prompt}
                             onChange={(e) => setPrompt(e.target.value)}
-                            placeholder="e.g. A fashion model wearing a red evening gown, full body, standing pose, studio lighting"
+                            placeholder={`e.g. A fashion model wearing a formal suit, full body, standing pose, studio lighting`}
                             disabled={isGenerating}
                             style={{
                                 width: '100%',

@@ -1,6 +1,23 @@
+/**
+ * LayerItem — a single row in the layers panel.
+ *
+ * Renders the layer thumbnail, name (editable inline), type badge,
+ * visibility/lock/delete controls, and a context menu with AI actions.
+ *
+ * Context menu contents differ by layer type:
+ *   drawing  — Clothify, Rename, Duplicate, Pattern Maker, Merge Down, Delete
+ *   reference — Text to Clothes, Stylebend Reference, Convert to Doodle
+ *
+ * The context menu is rendered via ReactDOM.createPortal into document.body
+ * so it is not clipped by the layers panel's overflow:hidden container.
+ * A mousedown listener on the document closes it when the user clicks outside.
+ *
+ * Inline rename: double-click the layer name (via context menu → Rename)
+ * to switch to an input. Enter or blur commits; Escape cancels.
+ */
 import React, { useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette } from 'lucide-react';
+import { Eye, EyeOff, Lock, Unlock, Trash2, Sparkles, Edit, Copy, Grid3x3, Image as ImageIcon, Palette, Wand2, PenLine, ArrowDownToLine } from 'lucide-react';
 import './LayersPanel.css';
 
 const LayerItem = ({
@@ -18,7 +35,11 @@ const LayerItem = ({
     onDelete,
     onClothify,
     onPatternMaker,
-    onStylebend
+    onStylebend,
+    onTextToClothes,
+    onExtractDoodle,
+    onMergeDown,
+    canMergeDown,
 }) => {
     const [showContextMenu, setShowContextMenu] = useState(false);
     const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
@@ -27,12 +48,16 @@ const LayerItem = ({
     const [nameValue, setNameValue] = useState(layer.name);
     const renameInputRef = useRef(null);
 
+    // Keep the displayed name in sync when the layer is renamed externally
+    // (e.g. via handleApplyClothify which sets the layer name programmatically).
     React.useEffect(() => {
         if (!isRenaming) {
             setNameValue(layer.name);
         }
     }, [layer.name, isRenaming]);
 
+    // Auto-focus the rename input after it mounts. setTimeout(0) defers focus
+    // until after React finishes the render that made the input visible.
     React.useEffect(() => {
         if (!isRenaming) return;
         const tid = setTimeout(() => renameInputRef.current?.focus(), 0);
@@ -41,11 +66,14 @@ const LayerItem = ({
 
     const handleContextMenu = (e) => {
         e.preventDefault();
+        // Store the cursor position so the portal-rendered menu appears exactly
+        // where the user right-clicked, regardless of scroll or layout.
         setContextMenuPos({ x: e.clientX, y: e.clientY });
         setShowContextMenu(true);
     };
 
     const handleClothify = () => {
+        // Close the menu before opening the modal so they don't overlap.
         setShowContextMenu(false);
         onClothify(layer);
     };
@@ -58,19 +86,23 @@ const LayerItem = ({
     const startRename = () => {
         setShowContextMenu(false);
         setIsRenaming(true);
+        // Pre-fill the input with the current name so the user can edit in place.
         setNameValue(layer.name);
     };
 
     const commitRename = () => {
         const trimmed = (nameValue || '').trim();
+        // Only fire the rename callback if the name actually changed.
         if (trimmed && trimmed !== layer.name) {
             onRename && onRename(layer.id, trimmed);
         }
+        // If the user cleared the field, revert to the original name.
         setNameValue(trimmed || layer.name);
         setIsRenaming(false);
     };
 
     const cancelRename = () => {
+        // Discard edits and restore the original name without calling onRename.
         setNameValue(layer.name);
         setIsRenaming(false);
     };
@@ -106,12 +138,12 @@ const LayerItem = ({
                     if (layer.type === 'reference') return;
                     e.preventDefault();
                     e.dataTransfer.dropEffect = 'move';
-                    onDragOver(layer.id);
+                    onDragOver(layer.id, e);
                 }}
                 onDrop={(e) => {
                     if (layer.type === 'reference') return;
                     e.preventDefault();
-                    onDrop(layer.id);
+                    onDrop(layer.id, e);
                 }}
                 onDragEnd={() => {
                     setIsDragging(false);
@@ -220,9 +252,23 @@ const LayerItem = ({
                         <>
                             <div className="layer-context-menu-item clothify" onClick={() => {
                                 setShowContextMenu(false);
+                                onTextToClothes && onTextToClothes(layer);
+                            }}>
+                                <Wand2 size={16} /> Text to Clothes
+                            </div>
+                            <div className="layer-context-menu-divider" />
+                            <div className="layer-context-menu-item clothify" onClick={() => {
+                                setShowContextMenu(false);
                                 onStylebend && onStylebend(layer);
                             }}>
                                 <Sparkles size={16} /> Stylebend Reference
+                            </div>
+                            <div className="layer-context-menu-divider" />
+                            <div className="layer-context-menu-item clothify" onClick={() => {
+                                setShowContextMenu(false);
+                                onExtractDoodle && onExtractDoodle(layer);
+                            }}>
+                                <PenLine size={16} /> Convert to Doodle
                             </div>
                         </>
                     ) : (
@@ -246,6 +292,17 @@ const LayerItem = ({
                             }}>
                                 <Grid3x3 size={16} /> Pattern Maker
                             </div>
+                            {canMergeDown && (
+                                <>
+                                    <div className="layer-context-menu-divider" />
+                                    <div className="layer-context-menu-item" onClick={() => {
+                                        setShowContextMenu(false);
+                                        onMergeDown && onMergeDown(layer.id);
+                                    }}>
+                                        <ArrowDownToLine size={16} /> Merge Down
+                                    </div>
+                                </>
+                            )}
                             <div className="layer-context-menu-divider" />
                             <div className="layer-context-menu-item" onClick={handleDelete}>
                                 <Trash2 size={16} /> Delete

@@ -1,6 +1,23 @@
+import os
+# Suppress ONNX Runtime's CUDA-DLL-not-found noise.  rembg uses ORT and tries
+# the CUDA provider first even when only CPU is available, producing a loud
+# but harmless error.  Setting this before any ORT import silences it.
+os.environ.setdefault("ORT_LOGGING_LEVEL", "4")   # 4 = FATAL only
+
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, message=".*_register_pytree_node.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pretrained.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*weight enum.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*flash attention.*")
+
+import logging
+# text_config_dict messages come from transformers' logger, not warnings.warn
+logging.getLogger("transformers").setLevel(logging.ERROR)
+
 import torch
 import io
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Response, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Response, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, EmailStr
@@ -9,6 +26,7 @@ from PIL import Image, ImageChops, ImageFilter
 from torchvision import transforms
 import os
 import base64
+import cv2
 import numpy as np
 import time
 import re
@@ -37,6 +55,22 @@ if stylebend_path not in sys.path:
 from scripts.inversion import load_model, project_image, resolve_device
 from scripts.blending import blend_latents
 
+# ── Shared CPU-only rembg session ────────────────────────────────────────────
+# Explicitly requesting CPUExecutionProvider prevents ORT from even attempting
+# to load the CUDA DLL, which would otherwise log a loud error on machines that
+# have onnxruntime-gpu installed but no matching CUDA toolkit.
+_rembg_session = None
+def get_rembg_session():
+    global _rembg_session
+    if _rembg_session is None:
+        from rembg import new_session
+        _rembg_session = new_session("u2net", providers=["CPUExecutionProvider"])
+    return _rembg_session
+
+def rembg_remove_cpu(data):
+    from rembg import remove as _remove
+    return _remove(data, session=get_rembg_session())
+# ─────────────────────────────────────────────────────────────────────────────
 
 MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI") or "mongodb://127.0.0.1:27017"
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME") or os.getenv("MONGO_DB_NAME") or "clothcraft_ai"
@@ -44,7 +78,12 @@ MONGODB_REQUIRED = os.getenv("MONGODB_REQUIRED", "false").lower() == "true"
 MONGODB_CONNECT_TIMEOUT_MS = int(os.getenv("MONGODB_CONNECT_TIMEOUT_MS", "5000"))
 MONGODB_CORS_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,"
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "https://cloth-craft-ai.vercel.app",
+    ).split(",")
     if origin.strip()
 ]
 
@@ -54,19 +93,23 @@ JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "cc_auth")
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
+AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "lax")
 
 password_hasher = PasswordHasher()
 
 
 def now_utc() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
 def utc_timestamp_ms() -> int:
+    """Return the current UTC time as milliseconds since epoch (for createdAt/updatedAt fields)."""
     return int(time.time() * 1000)
 
 
 def parse_object_id(raw_id: str) -> ObjectId:
+    """Convert a hex string to a MongoDB ObjectId, raising HTTP 400 on invalid input."""
     try:
         return ObjectId(raw_id)
     except Exception as exc:
@@ -74,6 +117,9 @@ def parse_object_id(raw_id: str) -> ObjectId:
 
 
 def serialize_project(doc: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a full project document (including layersSnapshot) for API responses.
+    Used when opening an existing project — the layersSnapshot is needed to hydrate the canvas.
+    """
     return {
         "id": str(doc["_id"]),
         "userId": doc["userId"],
@@ -85,20 +131,40 @@ def serialize_project(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def serialize_project_summary(doc: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a lightweight project summary (omits layersSnapshot) for the project list.
+    Keeping layersSnapshot out of the list response significantly reduces payload size.
+    """
+    return {
+        "id": str(doc["_id"]),
+        "userId": doc["userId"],
+        "name": doc["name"],
+        "createdAt": doc["createdAt"],
+        "updatedAt": doc["updatedAt"],
+        "thumbnail": doc.get("thumbnail"),
+    }
+
+
 def serialize_user(doc: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a user document for API responses (never includes passwordHash)."""
     return {
         "id": str(doc["_id"]),
         "email": doc["email"],
         "displayName": doc["displayName"],
+        "avatarUrl": doc.get("avatarUrl"),
         "createdAt": doc["createdAt"],
     }
 
 
 def normalize_project_name(name: str) -> str:
+    """Lowercase + collapse whitespace for case-insensitive uniqueness checks."""
     return " ".join(name.strip().lower().split())
 
 
 def build_name_conflict_filter(user_id: str, normalized_name: str, raw_name: str, exclude_id: Optional[ObjectId] = None) -> dict[str, Any]:
+    """Build a MongoDB filter that matches any project whose name collides with raw_name
+    (case-insensitive, whitespace-tolerant). Pass exclude_id when renaming to skip self.
+    """
     trimmed = raw_name.strip()
     escaped = re.escape(trimmed)
     conflict_filter: dict[str, Any] = {
@@ -114,6 +180,9 @@ def build_name_conflict_filter(user_id: str, normalized_name: str, raw_name: str
 
 
 def create_access_token(user_id: str) -> str:
+    """Issue a signed JWT with the user's ObjectId as the 'sub' claim.
+    Expiry is controlled by JWT_EXPIRE_MINUTES (default 24 h).
+    """
     expire = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES)
     payload = {
         "sub": user_id,
@@ -124,28 +193,39 @@ def create_access_token(user_id: str) -> str:
 
 
 def set_auth_cookie(response: Response, token: str) -> None:
+    """Attach the JWT as an HttpOnly cookie on the response.
+    HttpOnly prevents JavaScript from reading the token; secure/samesite are
+    configurable via env vars for local-dev vs. production deployments.
+    """
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
         value=token,
         httponly=True,
         secure=AUTH_COOKIE_SECURE,
-        samesite="lax",
+        samesite=AUTH_COOKIE_SAMESITE,
         max_age=JWT_EXPIRE_MINUTES * 60,
         path="/",
     )
 
 
 def clear_auth_cookie(response: Response) -> None:
+    """Remove the auth cookie on the response (sent back to the client on logout)."""
     response.delete_cookie(
         key=AUTH_COOKIE_NAME,
         httponly=True,
         secure=AUTH_COOKIE_SECURE,
-        samesite="lax",
+        samesite=AUTH_COOKIE_SAMESITE,
         path="/",
     )
 
 
 class MongoManager:
+    """Lifecycle wrapper around Motor (async MongoDB driver).
+
+    Handles connect/disconnect within the FastAPI lifespan context manager and
+    ensures all required indexes exist before the first request is served.
+    The app stores a single instance at app.state.mongo.
+    """
     def __init__(self, uri: str, db_name: str, timeout_ms: int = 5000):
         self.uri = uri
         self.db_name = db_name
@@ -166,6 +246,14 @@ class MongoManager:
         self.db = None
 
     async def _ensure_indexes(self) -> None:
+        """Create indexes idempotently on startup (Motor no-ops if they already exist).
+
+        Indexes created:
+          users.email          — unique; used by login and duplicate-check
+          projects.(userId, updatedAt DESC) — used by list_projects sort
+          projects.(userId, nameNormalized) — unique; enforces per-user name uniqueness
+          generation_logs.createdAt DESC    — used by analytics queries
+        """
         if self.db is None:
             return
         await self.db["users"].create_index([("email", ASCENDING)], unique=True)
@@ -244,7 +332,7 @@ NGF = 64
 NORM_LAYER = torch.nn.BatchNorm2d
 USE_DROPOUT = True
 
-# Stable Diffusion model for inpainting
+# Stable Diffusion model (Realistic Vision — standard SD 1.5, NOT an inpainting checkpoint)
 SD_MODEL_PATH = os.path.join(script_dir, 'models', 'realisticVisionV60B1_v51VAE.safetensors')
 
 # StyleGAN model for style blending
@@ -262,19 +350,28 @@ print(f"Using device: {device}")
 app = FastAPI(title="ClothCraft AI", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=MONGODB_CORS_ORIGINS,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
 )
 
 
 async def get_current_user(request: Request) -> dict[str, Any]:
+    """FastAPI dependency that validates the JWT and returns the user document.
+
+    Token lookup order: Authorization: Bearer header → HttpOnly cookie.
+    Raises HTTP 401 if the token is missing, expired, invalid, or the user no
+    longer exists in the database.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
 
-    token = request.cookies.get(AUTH_COOKIE_NAME)
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else None
+    if not token:
+        token = request.cookies.get(AUTH_COOKIE_NAME)
     if not token:
         raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -309,21 +406,52 @@ except Exception as e:
     print(f"⚠️  Error loading Pix2Pix model: {e} — doodle translation disabled.")
     pix2pix_model = None
 
-# Load Stable Diffusion inpainting model for Clothify feature
+# Fix huggingface_hub deprecated import for diffusers <= 0.25.0
 try:
-    from diffusers import StableDiffusionInpaintPipeline
-    print("Loading Stable Diffusion Inpainting model...")
-    sd_pipe = StableDiffusionInpaintPipeline.from_single_file(
+    import huggingface_hub
+    if not hasattr(huggingface_hub, 'cached_download'):
+        huggingface_hub.cached_download = huggingface_hub.hf_hub_download
+except ImportError:
+    pass
+
+# Load Stable Diffusion Img2Img model for Clothify feature
+# Realistic Vision is a standard SD 1.5 model (4-ch), NOT an inpainting model (9-ch),
+# so we must use StableDiffusionImg2ImgPipeline instead of the Inpaint pipeline.
+txt2img_pipe = None
+try:
+    from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionPipeline
+    print("Loading Stable Diffusion model...")
+    sd_pipe = StableDiffusionImg2ImgPipeline.from_single_file(
         SD_MODEL_PATH,
         torch_dtype=torch.float16 if device in ["cuda", "mps"] else torch.float32,
-        safety_checker=None
+        safety_checker=None,
+        requires_safety_checker=False
     ).to(device)
+
+    if hasattr(sd_pipe, 'safety_checker'):
+        sd_pipe.safety_checker = None
+
+    # Build a txt2img pipeline that shares all the same model weights (no extra VRAM).
+    # img2img with any initial image always encodes that image through the VAE first,
+    # which biases generation toward the input's colors even at strength=1.0.
+    # A proper txt2img pipeline starts from pure scheduler noise with no image latent.
+    txt2img_pipe = StableDiffusionPipeline(
+        vae=sd_pipe.vae,
+        text_encoder=sd_pipe.text_encoder,
+        tokenizer=sd_pipe.tokenizer,
+        unet=sd_pipe.unet,
+        scheduler=sd_pipe.scheduler,
+        safety_checker=None,
+        feature_extractor=getattr(sd_pipe, 'feature_extractor', None),
+        requires_safety_checker=False,
+    )
+
     print("✅ Stable Diffusion model loaded successfully!")
 except FileNotFoundError:
-    print(f"⚠️  SD model not found at {SD_MODEL_PATH} — inpainting disabled.")
+    print(f"⚠️  SD model not found at {SD_MODEL_PATH} — img2img disabled.")
     sd_pipe = None
 except Exception as e:
-    print(f"⚠️  Error loading SD model: {e} — inpainting disabled.")
+    print(f"⚠️  Error loading SD model: {e} — img2img disabled.")
     sd_pipe = None
 
 # Load StyleGAN-Human model
@@ -339,7 +467,9 @@ except Exception as e:
     stylegan_model = None
 
 
-# Define the image transformations (should match training)
+# Pix2Pix input pre-processing: resize to 256×256 (matches the training crop size),
+# convert to [0,1] tensor, then normalize to [-1,1] — the range expected by the
+# UnetGenerator's tanh output activation.
 transform = transforms.Compose([
     transforms.Resize((256, 256)), # Matches 'crop_size: 256'
     transforms.ToTensor(),
@@ -354,6 +484,10 @@ async def log_generation_event(
     metadata: Optional[dict[str, Any]] = None,
     error: Optional[str] = None,
 ) -> None:
+    """Write a non-blocking analytics record for every AI generation call.
+    Failures are swallowed and printed rather than propagated so a logging
+    error can never cause a user-facing 500 response.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         return
@@ -372,51 +506,182 @@ async def log_generation_event(
 
 
 
-def translate_doodle(doodle_bytes):
-    """Translates doodle using Pix2Pix model"""
-    print("🎨 Running Pix2Pix doodle translation...")
-    
-    # Load original image
+# ── Clothing/body parsing model (SegFormer fine-tuned on ATR dataset) ──────
+# Labels:
+#   0 Background, 1 Hat, 2 Hair, 3 Sunglasses, 4 Upper-clothes, 5 Skirt,
+#   6 Pants, 7 Dress, 8 Belt, 9 Left-shoe, 10 Right-shoe, 11 Face,
+#   12 Left-leg, 13 Right-leg, 14 Left-arm, 15 Right-arm, 16 Bag, 17 Scarf
+_BODY_PART_LABELS = {2, 11, 12, 13, 14, 15}  # Hair, Face, legs, arms
+
+_clothes_seg = None
+def _get_clothes_segmenter():
+    """Lazy-load the SegFormer clothing segmentation model (cached)."""
+    global _clothes_seg
+    if _clothes_seg is None:
+        from transformers import SegformerImageProcessor, AutoModelForSemanticSegmentation
+        print("   ⚙️  Loading clothing segmentation model (mattmdjaga/segformer_b2_clothes)...")
+        processor = SegformerImageProcessor.from_pretrained("mattmdjaga/segformer_b2_clothes")
+        model     = AutoModelForSemanticSegmentation.from_pretrained("mattmdjaga/segformer_b2_clothes")
+        model.eval()
+        _clothes_seg = (processor, model)
+    return _clothes_seg
+
+
+def _erase_body_parts(rgb_arr, alpha):
+    """Pixel-accurate body-part erasure using SegFormer clothing parser.
+
+    Per-pixel labels for face, hair, arms, legs are zeroed in alpha — clothing
+    pixels survive untouched. No rectangles, no color heuristics.
+    """
+    try:
+        processor, model = _get_clothes_segmenter()
+        h, w = rgb_arr.shape[:2]
+
+        pil_rgb = Image.fromarray(rgb_arr)
+        with torch.no_grad():
+            inputs  = processor(images=pil_rgb, return_tensors="pt")
+            logits  = model(**inputs).logits  # [1, num_labels, h_logits, w_logits]
+            up      = torch.nn.functional.interpolate(
+                logits, size=(h, w), mode="bilinear", align_corners=False
+            )
+            pred    = up.argmax(dim=1)[0].cpu().numpy()  # (h, w) int
+
+        # Build a body-parts mask (True where pixel is face/hair/arms/legs)
+        body_mask = np.isin(pred, list(_BODY_PART_LABELS))
+
+        # Light dilation so we also catch the 1–2 px boundary between
+        # skin and clothing (e.g. collar/cuff edges).
+        body_u8 = body_mask.astype(np.uint8) * 255
+        body_u8 = cv2.dilate(body_u8, np.ones((5, 5), np.uint8), iterations=1)
+        # Soft feather so the cut isn't pixel-sharp.
+        body_u8 = cv2.GaussianBlur(body_u8, (11, 11), 0)
+
+        erase_weight = body_u8.astype(np.float32) / 255.0
+        return (alpha.astype(np.float32) * (1.0 - erase_weight)).astype(np.uint8)
+
+    except Exception as e:
+        print(f"   ⚠️ Body-part erasure failed ({e}) — skipping.")
+        return alpha
+
+
+def extract_doodle_from_image(img_bytes, num_colors=3):
+    """Convert a clothing/fashion image into an editable flat-color doodle.
+
+    Pipeline:
+      1. rembg          — strip scene background, keep full subject.
+      2. SegFormer      — per-pixel parse: erase face / hair / arms / legs.
+      3. Smooth         — bilateral + median blur to flatten texture and wrinkles.
+      4. K-means        — reduce to N flat colors (default 6).
+      5. Output         — RGBA PNG with transparent background.
+    """
+    pil_in = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+    rgb = np.array(pil_in)
+    h, w = rgb.shape[:2]
+
+    # ── 1. Remove scene background ────────────────────────────────────────
+    try:
+        cut_bytes = rembg_remove_cpu(img_bytes)
+        cut_pil = Image.open(io.BytesIO(cut_bytes)).convert('RGBA')
+        if cut_pil.size != (w, h):
+            cut_pil = cut_pil.resize((w, h), Image.LANCZOS)
+        cut_arr = np.array(cut_pil)
+        alpha = cut_arr[:, :, 3].copy()
+        rgb   = cut_arr[:, :, :3]
+    except Exception as e:
+        print(f"   ⚠️ rembg unavailable ({e}) — using brightness fallback.")
+        gray  = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        alpha = np.where(gray < 245, 255, 0).astype(np.uint8)
+
+    # ── 2. Erase face / hair / arms / legs (per-pixel SegFormer clothing parser) ──
+    alpha = _erase_body_parts(rgb, alpha)
+
+    # ── 3. Smooth to flatten texture / wrinkles ───────────────────────────
+    smooth = cv2.bilateralFilter(rgb, 9, 80, 80)
+    smooth = cv2.medianBlur(smooth, 5)
+
+    # ── 4. K-means color quantization on remaining foreground pixels ──────
+    n_colors = max(2, min(int(num_colors), 16))
+    fg_mask  = alpha > 32
+
+    if fg_mask.sum() < n_colors:
+        out_rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    else:
+        fg_pixels = smooth[fg_mask].reshape(-1, 3).astype(np.float32)
+        criteria  = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 12, 1.0)
+        _, labels, centers = cv2.kmeans(
+            fg_pixels, n_colors, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+        )
+        centers = centers.astype(np.uint8)
+        flat = np.zeros_like(smooth)
+        flat[fg_mask] = centers[labels.flatten()]
+
+        out_rgba = np.dstack([flat, alpha])
+        out_rgba[~fg_mask] = (0, 0, 0, 0)
+
+    out_pil = Image.fromarray(out_rgba, mode='RGBA')
+    buf = io.BytesIO()
+    out_pil.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
+
+def translate_doodle(doodle_bytes, return_rgba=False, fast=False):
+    """Translates doodle using Pix2Pix model.
+
+    return_rgba=True  → returns an RGBA PNG with real transparency.
+    fast=True         → skips rembg (heavy neural net); uses fast threshold BG removal instead.
+                        Ideal for live preview where speed matters more than perfect edges.
+    return_rgba=False → composites onto black and returns RGB PNG (legacy behaviour).
+    """
+    print(f"🎨 Running Pix2Pix doodle translation (fast={fast})...")
+
     original = Image.open(io.BytesIO(doodle_bytes))
-    
-    # If image has an alpha channel, composite it onto a WHITE background
-    # This is CRITICAL because the Pix2Pix model was trained on white-background sketches.
-    # PIL's default .convert('RGB') makes transparent areas BLACK, which the model doesn't understand.
+
+    # Pix2Pix expects a solid-background RGB image.
+    # Flatten any transparent areas onto white so the model doesn't see black holes.
     if original.mode == 'RGBA':
         image = Image.new("RGB", original.size, (255, 255, 255))
         image.paste(original, mask=original.split()[3])
     else:
         image = original.convert('RGB')
-        
+
+    # Apply the standard pix2pix preprocessing (256×256 resize + [-1,1] normalisation).
     input_tensor = transform(image).unsqueeze(0).to(device)
 
+    # Forward pass — no gradients needed during inference.
     with torch.no_grad():
         output_tensor = pix2pix_model(input_tensor)
 
-    # De-normalize the output tensor from [-1, 1] to [0, 1]
+    # De-normalise from [-1,1] back to [0,1] then convert to a PIL image.
     output_image = output_tensor.squeeze(0).cpu()
     output_image = (output_image * 0.5) + 0.5
-    
-    # Convert tensor back to a PIL Image
     output_image = transforms.ToPILImage()(output_image)
 
-    # --- POST-PROCESSING ---
-    # The Pix2Pix model often produces a light gray background [~180, 180, 180].
-    # The frontend expects a BLACK background to correctly composite the result.
-    # We use rembg to remove the gray background and place the object on black.
+    if fast and return_rgba:
+        # Fast path: threshold-based BG removal, no rembg neural net.
+        out_np = np.array(output_image)
+        alpha_mask = (np.max(out_np, axis=2) > 20).astype(np.uint8) * 255
+        out_rgba = np.dstack([out_np, alpha_mask])
+        byte_io = io.BytesIO()
+        Image.fromarray(out_rgba, 'RGBA').save(byte_io, 'PNG')
+        byte_io.seek(0)
+        return byte_io
+
     try:
-        from rembg import remove as rembg_remove
         print("   🪄 Removing Pix2Pix background using rembg...")
-        
-        # Convert to PNG bytes for rembg
+
         temp_io = io.BytesIO()
         output_image.save(temp_io, format="PNG")
-        
-        # Remove background
-        result_bytes = rembg_remove(temp_io.getvalue())
+        result_bytes = rembg_remove_cpu(temp_io.getvalue())
         output_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
-        
-        # Composite onto BLACK background (required by frontend skip-black logic)
+
+        if return_rgba:
+            byte_io = io.BytesIO()
+            output_rgba.save(byte_io, 'PNG')
+            byte_io.seek(0)
+            return byte_io
+
+        # Legacy: composite onto black for Clothify's skip-black pixel logic.
         black_bg = Image.new("RGBA", output_rgba.size, (0, 0, 0, 255))
         black_bg.paste(output_rgba, mask=output_rgba.split()[3])
         output_image = black_bg.convert("RGB")
@@ -424,64 +689,84 @@ def translate_doodle(doodle_bytes):
     except Exception as e:
         print(f"   ⚠️ Background cleanup failed ({e}) — returning raw model output.")
 
-    # Save image to a byte buffer to send as response
     byte_io = io.BytesIO()
     output_image.save(byte_io, 'PNG')
     byte_io.seek(0)
-    
     return byte_io
 
 def inpaint_with_stable_diffusion(reference_image_bytes, mask_bytes, prompt="", strength=0.75):
-    """Inpaints reference image using Stable Diffusion with the mask"""
+    """Inpaints reference image using Stable Diffusion Img2Img with manual mask compositing.
+    
+    Because we use a standard (non-inpainting) SD model, we simulate inpainting by:
+    1. Adding noise/white to the masked region of the input image
+    2. Running img2img so the model regenerates that region
+    3. Compositing the result back: keep original pixels outside the mask
+    """
     if sd_pipe is None:
         raise Exception("Stable Diffusion model not loaded")
     
-    # Load reference image with Alpha channel
+    # Preserve the original alpha channel — we'll restore it after compositing.
     original_rgba = Image.open(io.BytesIO(reference_image_bytes)).convert('RGBA')
-    
-    # Composite onto pure white background so SD doesn't see black voids
+
+    # Flatten alpha onto white so SD never sees transparent (black) voids.
     reference_image = Image.new("RGB", original_rgba.size, (255, 255, 255))
     reference_image.paste(original_rgba, mask=original_rgba.split()[3])
 
-    mask_image = Image.open(io.BytesIO(mask_bytes)).convert('L')  # Grayscale mask
-    
-    # Resize to optimal size for SD (512x512 recommended)
+    # Build a binary mask from the Pix2Pix output.
+    # Converting the coloured Pix2Pix result to grayscale would turn saturated
+    # colours (red, cyan) into mid-grey, creating unwanted partial transparency.
+    # A max-channel brightness threshold gives a clean object vs background split.
+    pix2pix_img = Image.open(io.BytesIO(mask_bytes)).convert('RGB')
+    p2p_np = np.array(pix2pix_img)
+    mask_np_raw = (np.max(p2p_np, axis=2) > 20).astype(np.uint8) * 255  # >20 = not background
+    mask_image = Image.fromarray(mask_np_raw, mode='L')
+
     original_size = reference_image.size
+    # SD 1.5 produces best results at 512×512; larger inputs slow inference without quality gain.
     reference_image = reference_image.resize((512, 512), Image.LANCZOS)
-    
-    # Resize mask with BILINEAR (LANCZOS can create ringing on masks)
-    # Then apply a slight Gaussian blur to smooth the transition for the AI
+
+    # BILINEAR for masks avoids the ringing artefacts LANCZOS introduces on hard edges.
     mask_image = mask_image.resize((512, 512), Image.BILINEAR)
-    mask_image = mask_image.filter(ImageFilter.GaussianBlur(radius=4))
-    
-    # Use prompt directly without forcing clothing/fabric keywords
+    # A tiny Gaussian blur softens the hard threshold edge so SD blends more naturally.
+    mask_image = mask_image.filter(ImageFilter.GaussianBlur(radius=2))
+
+    # The frontend composited the Pix2Pix result onto the reference before calling this,
+    # so the masked region already shows the desired garment colour/texture.
+    # img2img at the given strength refines those pixels without regenerating from scratch.
+    mask_np = np.array(mask_image).astype(np.float32) / 255.0  # float mask for compositing
+
     enhanced_prompt = prompt if prompt else "high quality, detailed"
-    
-    # Negative prompt to protect face and maintain quality
+
+    # Face-protection negative: prevents SD from regenerating facial features inside the mask.
     negative_prompt = "face changes, facial features, distorted face, blurry face, deformed face, bad anatomy, low quality, blurry, distorted"
-    
-    print(f"🎚️ Inpainting with strength: {strength}")
+
+    print(f"🎚️ Img2Img inpainting with strength: {strength}")
     print(f"📝 Prompt: {enhanced_prompt}")
     print(f"🚫 Negative prompt: {negative_prompt}")
-    
-    # Inpaint with Stable Diffusion
+
     result = sd_pipe(
         prompt=enhanced_prompt,
-        negative_prompt=negative_prompt,  # Tell AI what NOT to do
+        negative_prompt=negative_prompt,
         image=reference_image,
-        mask_image=mask_image,
-        strength=float(strength),  # How much to change (0.0-1.0)
+        strength=float(strength),
         num_inference_steps=50,
         guidance_scale=7.5,
     ).images[0]
-    
-    # Resize back to original size and restore the original alpha channel (background cutout)
-    result = result.resize(original_size, Image.LANCZOS).convert('RGBA')
-    result.putalpha(original_rgba.split()[3])
+
+    # Hard pixel composite: blend SD output inside the mask, keep original outside.
+    # This guarantees that pixels outside the doodle region are always 100% original.
+    ref_np = np.array(reference_image).astype(np.float32)
+    result_np = np.array(result.resize((512, 512), Image.LANCZOS)).astype(np.float32)
+    final_np = ref_np * (1.0 - mask_np[..., None]) + result_np * mask_np[..., None]
+    composited = Image.fromarray(final_np.astype(np.uint8))
+
+    # Scale back to original resolution and re-attach the original alpha channel.
+    composited = composited.resize(original_size, Image.LANCZOS).convert('RGBA')
+    composited.putalpha(original_rgba.split()[3])
     
     # Save to byte buffer
     byte_io = io.BytesIO()
-    result.save(byte_io, 'PNG')
+    composited.save(byte_io, 'PNG')
     byte_io.seek(0)
     
     return byte_io
@@ -507,12 +792,11 @@ def outpaint_to_full_body(img_pil):
     # which has clean white backgrounds
     # ---------------------------------------------------------------
     try:
-        from rembg import remove as rembg_remove
         print("   🪄 Removing background using rembg...")
         img_bytes_io = io.BytesIO()
         img_pil.save(img_bytes_io, format="PNG")
         img_bytes_val = img_bytes_io.getvalue()
-        result_bytes = rembg_remove(img_bytes_val)
+        result_bytes = rembg_remove_cpu(img_bytes_val)
         img_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
 
         # Place the cutout (alpha-composited) on a pure WHITE background
@@ -542,9 +826,11 @@ def outpaint_to_full_body(img_pil):
     # Create white canvas
     canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
 
-    # Center horizontally, align to bottom (feet at the bottom)
+    # Center horizontally, and center vertically.
+    # Bottom-aligning pushes the head too low on 512x768 inputs, which completely 
+    # breaks the StyleGAN perceptual face loss (which targets the top 25% of the canvas).
     x_offset = (canvas_w - new_w) // 2
-    y_offset = canvas_h - new_h  # stick figure to the bottom of canvas
+    y_offset = (canvas_h - new_h) // 2
 
     canvas.paste(scaled_img, (x_offset, y_offset))
 
@@ -555,12 +841,16 @@ def outpaint_to_full_body(img_pil):
 
 # Route for translating doodle with Pix2Pix
 @app.post('/translate-doodle')
-async def translate_doodle_endpoint(file: UploadFile = File(...)):
+async def translate_doodle_endpoint(
+    file: UploadFile = File(...),
+    rgba: bool = Query(False, description="Return RGBA PNG with real transparency instead of black-background RGB"),
+    fast: bool = Query(False, description="Skip rembg; use threshold BG removal for low-latency live preview"),
+):
     """Translates doodle using Pix2Pix model"""
     start = time.perf_counter()
     try:
         img_bytes = await file.read()
-        result_bytes = translate_doodle(img_bytes)
+        result_bytes = translate_doodle(img_bytes, return_rgba=rgba, fast=fast)
         await log_generation_event(
             endpoint="translate-doodle",
             status="success",
@@ -578,6 +868,39 @@ async def translate_doodle_endpoint(file: UploadFile = File(...)):
             error=str(e),
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post('/extract-doodle')
+async def extract_doodle_endpoint(
+    file: UploadFile = File(...),
+    num_colors: int = Query(3, description="Number of flat colors in the quantized output (2-16)"),
+):
+    """Convert a clothing image into an editable flat-color 'doodle' (clothing only).
+
+    Uses rembg to keep only the garment, then k-means color quantization to
+    flatten it into a few solid colors. Output is RGBA PNG with transparent BG.
+    """
+    start = time.perf_counter()
+    try:
+        img_bytes = await file.read()
+        result_bytes = extract_doodle_from_image(img_bytes, num_colors=num_colors)
+        await log_generation_event(
+            endpoint="extract-doodle",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"filename": file.filename, "num_colors": num_colors},
+        )
+        return StreamingResponse(result_bytes, media_type='image/png')
+    except Exception as e:
+        print(f"Error extracting doodle: {e}")
+        await log_generation_event(
+            endpoint="extract-doodle",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"filename": file.filename},
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Route for inpainting with Stable Diffusion
 @app.post('/inpaint')
@@ -668,9 +991,527 @@ async def refine_pattern_endpoint(
         )
         raise HTTPException(status_code=500, detail=str(e))
 
-# Global cache for latents to make slider adjustments instant
+# Route for refining a StyleGAN blended result with Stable Diffusion
+@app.post('/refine-stylebend')
+async def refine_stylebend_endpoint(
+    image: UploadFile = File(...),
+    strength: str = Form('0.35'),
+):
+    """Refines a StyleGAN blended fashion image using SD img2img.
+    
+    Low strength (0.35) preserves the outfit silhouette/pose from StyleGAN 
+    while adding realistic fabric texture, sharpness and VS visual quality.
+    """
+    if sd_pipe is None:
+        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
+
+    print("✨ Refining StyleGAN output with Stable Diffusion...")
+    start = time.perf_counter()
+    try:
+        image_bytes = await image.read()
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        # Resize to 512x768 — SD 1.5 portrait native resolution
+        img = img.resize((512, 768), Image.LANCZOS)
+
+        prompt = (
+            "fashion model wearing stylish outfit, high quality fabric texture, "
+            "sharp details, professional fashion photography, clean white background, "
+            "full body portrait, photorealistic"
+        )
+        negative_prompt = (
+            "low quality, blurry, distorted, deformed, bad anatomy, extra limbs, "
+            "duplicate, cropped, watermark, text, artifacts, noise"
+        )
+
+        result = sd_pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=img,
+            strength=float(strength),
+            num_inference_steps=30,
+            guidance_scale=7.5,
+        ).images[0]
+
+        byte_io = io.BytesIO()
+        result.save(byte_io, 'PNG')
+        byte_io.seek(0)
+
+        await log_generation_event(
+            endpoint="refine-stylebend",
+            status="success",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"strength": strength},
+        )
+        return StreamingResponse(byte_io, media_type='image/png')
+    except Exception as e:
+        print(f"Error refining StyleGAN output: {e}")
+        await log_generation_event(
+            endpoint="refine-stylebend",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            metadata={"strength": strength},
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Latent cache: maps MD5(image_bytes + outpaint_flag) → projected W latent.
+# GAN inversion (400 optimizer steps per image) is expensive (~30 s on GPU).
+# Caching means repeated blend requests with the same images only invert once,
+# making the Stylebend alpha slider nearly instant after the first call.
 latent_cache = {}
 import hashlib
+
+# ─── Garment-keyword → SegFormer label IDs ──────────────────────────────────
+# SegFormer labels (mattmdjaga/segformer_b2_clothes):
+#   0 Background  1 Hat       2 Hair      3 Sunglasses 4 Upper-clothes
+#   5 Skirt       6 Pants     7 Dress     8 Belt       9 Left-shoe
+#  10 Right-shoe 11 Face     12 L-leg    13 R-leg     14 L-arm
+#  15 R-arm     16 Bag      17 Scarf
+# Multi-word entries are listed first so substring matching picks them before
+# their single-word components.
+GARMENT_LABEL_MAP = [
+    ('crop top',   {4}),
+    ('tank top',   {4}),
+    ('button up',  {4}),
+    ('button-up',  {4}),
+    ('t-shirt',    {4}),
+    ('tshirt',     {4}),
+    ('shirt',      {4}),
+    ('blouse',     {4}),
+    ('sweatshirt', {4}),
+    ('sweater',    {4}),
+    ('hoodie',     {4}),
+    ('jacket',     {4}),
+    ('blazer',     {4}),
+    ('cardigan',   {4}),
+    ('pullover',   {4}),
+    ('jumper',     {4}),
+    ('coat',       {4}),
+    ('vest',       {4}),
+    ('tee',        {4}),
+    ('top',        {4}),
+
+    # Full-body garments — replace upper + lower regions
+    ('dress',      {4, 5, 6, 7}),
+    ('gown',       {4, 5, 6, 7}),
+    ('frock',      {4, 5, 6, 7}),
+    ('robe',       {4, 5, 6, 7}),
+    ('jumpsuit',   {4, 5, 6, 7}),
+    ('overall',    {4, 5, 6, 7}),
+
+    # Lower body
+    ('jeans',      {6}),
+    ('trousers',   {6}),
+    ('chinos',     {6}),
+    ('slacks',     {6}),
+    ('leggings',   {6}),
+    ('joggers',    {6}),
+    ('sweatpants', {6}),
+    ('shorts',     {6}),
+    ('pants',      {6}),
+    ('skirt',      {5}),
+
+    # Two-piece
+    ('suit',       {4, 6}),
+
+    # Headwear
+    ('beanie',     {1}),
+    ('cap',        {1}),
+    ('hat',        {1}),
+
+    ('scarf',      {17}),
+    ('belt',       {8}),
+]
+
+
+def _detect_garment_labels(prompt: str):
+    """Match garment keywords in prompt → set of SegFormer label IDs."""
+    p = prompt.lower()
+    matched = set()
+    for keyword, labels in GARMENT_LABEL_MAP:
+        if keyword in p:
+            matched.update(labels)
+    if not matched:
+        matched = {4}   # default: replace upper-clothes
+    return matched
+
+
+# The natural BODY REGION a garment should occupy, regardless of what's currently
+# in the reference image. e.g. "trousers" should cover the full legs even if the
+# model is wearing shorts. We build the mask over this region (not just existing
+# garment pixels) and then pre-paint it with the requested colour so SD has a
+# strong colour+shape signal to work from.
+#   Labels: 4 Upper-clothes  5 Skirt  6 Pants  7 Dress
+#          12 L-leg  13 R-leg  14 L-arm  15 R-arm
+GARMENT_REGION_MAP = [
+    # Long lower-body → full legs
+    ('jeans',       {6, 12, 13}),
+    ('trousers',    {6, 12, 13}),
+    ('chinos',      {6, 12, 13}),
+    ('slacks',      {6, 12, 13}),
+    ('leggings',    {6, 12, 13}),
+    ('joggers',     {6, 12, 13}),
+    ('sweatpants',  {6, 12, 13}),
+    ('pants',       {6, 12, 13}),
+
+    # Long upper-body with sleeves → torso + arms
+    ('long sleeve', {4, 14, 15}),
+    ('long-sleeve', {4, 14, 15}),
+    ('hoodie',      {4, 14, 15}),
+    ('sweatshirt',  {4, 14, 15}),
+    ('sweater',     {4, 14, 15}),
+    ('cardigan',    {4, 14, 15}),
+    ('jacket',      {4, 14, 15}),
+    ('blazer',      {4, 14, 15}),
+    ('coat',        {4, 14, 15}),
+
+    # Skirt → skirt region + legs (so it can extend below)
+    ('skirt',       {5, 12, 13}),
+
+    # Full-body → torso + legs
+    ('jumpsuit',    {4, 5, 6, 7, 12, 13}),
+    ('overall',     {4, 5, 6, 7, 12, 13}),
+    ('dress',       {4, 5, 6, 7, 12, 13}),
+    ('gown',        {4, 5, 6, 7, 12, 13}),
+    ('frock',       {4, 5, 6, 7, 12, 13}),
+    ('robe',        {4, 5, 6, 7, 12, 13}),
+
+    # Two-piece → upper + legs + arms
+    ('suit',        {4, 6, 12, 13, 14, 15}),
+]
+
+
+def _detect_garment_region(prompt: str):
+    """Return the natural body-region labels the requested garment should cover,
+    or None if the garment doesn't need region extension (e.g. short-sleeve
+    shirts, shorts — those stay limited to existing garment pixels)."""
+    p = prompt.lower()
+    for keyword, labels in GARMENT_REGION_MAP:
+        if keyword in p:
+            return set(labels)
+    return None
+
+
+def _color_prefill(image_pil: Image.Image, mask_pil: Image.Image, color_rgb) -> Image.Image:
+    """Paint the masked region of *image_pil* with *color_rgb* and a touch of
+    brightness noise so SD treats it as fabric, not a flat slab. Outside the
+    mask is unchanged."""
+    img = np.array(image_pil.convert('RGB')).astype(np.float32)
+    msk = np.array(mask_pil.convert('L')).astype(np.float32) / 255.0
+    color_arr = np.array(color_rgb, dtype=np.float32).reshape(1, 1, 3)
+
+    h, w = img.shape[:2]
+    noise = (np.random.rand(h, w, 1).astype(np.float32) - 0.5) * 12.0
+    painted = np.clip(color_arr + noise, 0, 255)
+
+    out = img * (1.0 - msk[..., None]) + painted * msk[..., None]
+    return Image.fromarray(out.astype(np.uint8))
+
+
+def _build_garment_mask(reference_rgb: Image.Image, label_ids) -> Image.Image:
+    """Pixel-accurate mask of the requested garment regions, returned as PIL 'L'."""
+    arr = np.array(reference_rgb)
+    h, w = arr.shape[:2]
+
+    processor, model = _get_clothes_segmenter()
+    pil = Image.fromarray(arr)
+    with torch.no_grad():
+        inputs = processor(images=pil, return_tensors="pt")
+        logits = model(**inputs).logits
+        up = torch.nn.functional.interpolate(
+            logits, size=(h, w), mode="bilinear", align_corners=False
+        )
+        pred = up.argmax(dim=1)[0].cpu().numpy()
+
+    mask_u8 = np.isin(pred, list(label_ids)).astype(np.uint8) * 255
+
+    # Slight dilate then feather so SD has a few pixels of margin to blend.
+    mask_u8 = cv2.dilate(mask_u8, np.ones((5, 5), np.uint8), iterations=2)
+    mask_u8 = cv2.GaussianBlur(mask_u8, (15, 15), 0)
+    return Image.fromarray(mask_u8, mode='L')
+
+
+def _masked_latent_inpaint(
+    image_pil: Image.Image,
+    mask_pil:  Image.Image,
+    prompt: str,
+    negative_prompt: str,
+    strength: float = 0.95,
+    num_steps: int = 30,
+    guidance: float = 7.5,
+) -> Image.Image:
+    """Real masked-latent inpainting using the standard 4-channel SD img2img model.
+
+    At every denoising step:
+      • Inside  the mask → keep the model's denoised latent (the new garment).
+      • Outside the mask → re-blend the original latent renoised to this step
+        (so face/body/background converge back to the source image).
+
+    This gives true inpainting behaviour without requiring a 9-channel inpaint
+    checkpoint — the only thing we change in the final image is what's masked.
+    """
+    pipe   = sd_pipe
+    device = pipe.device
+    dtype  = pipe.unet.dtype
+
+    # ── Encode original image to latents ───────────────────────────────────
+    img_np = np.array(image_pil.convert('RGB')).astype(np.float32) / 255.0
+    img_t  = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(device, dtype)
+    img_t  = 2.0 * img_t - 1.0
+    with torch.no_grad():
+        init_latents = pipe.vae.encode(img_t).latent_dist.sample() * pipe.vae.config.scaling_factor
+
+    # ── Build latent-resolution mask (1/8 of image) ────────────────────────
+    h_lat, w_lat = init_latents.shape[-2:]
+    mask_np = np.array(mask_pil.convert('L')).astype(np.float32) / 255.0
+    mask_lat = cv2.resize(mask_np, (w_lat, h_lat), interpolation=cv2.INTER_LINEAR)
+    mask_t = torch.from_numpy(mask_lat).unsqueeze(0).unsqueeze(0).to(device, dtype)
+
+    # ── Encode prompts (CFG) ───────────────────────────────────────────────
+    tok = pipe.tokenizer
+    pos = tok([prompt],          padding="max_length", max_length=tok.model_max_length,
+              truncation=True, return_tensors="pt").input_ids.to(device)
+    neg = tok([negative_prompt], padding="max_length", max_length=tok.model_max_length,
+              truncation=True, return_tensors="pt").input_ids.to(device)
+    with torch.no_grad():
+        pos_emb = pipe.text_encoder(pos)[0]
+        neg_emb = pipe.text_encoder(neg)[0]
+    cond_emb = torch.cat([neg_emb, pos_emb])
+
+    # ── Setup scheduler with strength offset ───────────────────────────────
+    pipe.scheduler.set_timesteps(num_steps, device=device)
+    all_t   = pipe.scheduler.timesteps
+    init_idx = max(0, int(num_steps * (1.0 - strength)))
+    timesteps = all_t[init_idx:]
+
+    noise = torch.randn_like(init_latents)
+    latents = pipe.scheduler.add_noise(init_latents, noise, timesteps[:1])
+
+    # ── Denoising loop with mask blending ──────────────────────────────────
+    for i, t in enumerate(timesteps):
+        with torch.no_grad():
+            inp = torch.cat([latents, latents])
+            inp = pipe.scheduler.scale_model_input(inp, t)
+            noise_pred = pipe.unet(inp, t, encoder_hidden_states=cond_emb).sample
+
+        n_uncond, n_text = noise_pred.chunk(2)
+        noise_pred = n_uncond + guidance * (n_text - n_uncond)
+
+        latents = pipe.scheduler.step(noise_pred, t, latents).prev_sample
+
+        # Renoise the original to the *next* timestep, then blend.
+        if i + 1 < len(timesteps):
+            t_next = timesteps[i + 1].unsqueeze(0)
+            noisy_orig = pipe.scheduler.add_noise(init_latents, noise, t_next)
+        else:
+            noisy_orig = init_latents
+        latents = latents * mask_t + noisy_orig * (1.0 - mask_t)
+
+    # ── Decode latents to image ────────────────────────────────────────────
+    with torch.no_grad():
+        decoded = pipe.vae.decode(latents / pipe.vae.config.scaling_factor).sample
+    decoded = ((decoded + 1) / 2).clamp(0, 1)
+    out_np  = (decoded[0].permute(1, 2, 0).float().cpu().numpy() * 255).astype(np.uint8)
+    return Image.fromarray(out_np)
+
+
+_COLOR_MAP = {
+    # Multi-word first so they match before single-word substrings
+    'sky blue':   (100, 160, 220),
+    'baby blue':  (140, 185, 230),
+    'navy blue':  ( 20,  30, 100),
+    'dark blue':  ( 25,  45, 120),
+    'light blue': (120, 180, 230),
+    'dark green': ( 25,  80,  40),
+    'olive green':( 90, 110,  45),
+    'dark red':   (140,  20,  20),
+    'dark grey':  ( 70,  70,  70),
+    'dark gray':  ( 70,  70,  70),
+    'light grey': (190, 190, 190),
+    'light gray': (190, 190, 190),
+    # Single-word colours
+    'red':        (210,  55,  55),
+    'crimson':    (175,  25,  30),
+    'scarlet':    (195,  45,  30),
+    'blue':       ( 55, 100, 205),
+    'navy':       ( 20,  30, 100),
+    'cobalt':     ( 35,  75, 160),
+    'black':      ( 28,  28,  28),
+    'white':      (242, 242, 242),
+    'cream':      (240, 228, 200),
+    'ivory':      (240, 235, 215),
+    'green':      ( 50, 150,  65),
+    'olive':      ( 95, 115,  45),
+    'emerald':    ( 25, 140,  75),
+    'yellow':     (220, 200,  45),
+    'gold':       (200, 165,  40),
+    'mustard':    (190, 155,  40),
+    'purple':     (115,  45, 180),
+    'violet':     (135,  55, 180),
+    'lavender':   (170, 125, 205),
+    'pink':       (225,  95, 150),
+    'magenta':    (200,  45, 150),
+    'rose':       (210,  75, 130),
+    'orange':     (220, 115,  45),
+    'coral':      (220,  95,  75),
+    'peach':      (225, 158, 125),
+    'brown':      (115,  75,  45),
+    'tan':        (180, 138,  95),
+    'khaki':      (180, 168, 128),
+    'beige':      (212, 190, 158),
+    'camel':      (190, 150,  95),
+    'grey':       (128, 128, 128),
+    'gray':       (128, 128, 128),
+    'silver':     (178, 178, 178),
+    'teal':       ( 45, 148, 148),
+    'cyan':       ( 45, 178, 200),
+    'turquoise':  ( 55, 175, 168),
+    'mint':       (148, 210, 178),
+    'maroon':     (115,  25,  30),
+    'burgundy':   ( 95,  18,  38),
+    'wine':       (100,  20,  40),
+}
+
+def _parse_color_from_prompt(prompt: str):
+    """Return (R, G, B) for the first colour keyword found in *prompt*."""
+    pl = prompt.lower()
+    # Longest match first so 'navy blue' beats 'blue'
+    for name in sorted(_COLOR_MAP, key=len, reverse=True):
+        if name in pl:
+            return _COLOR_MAP[name]
+    return (148, 128, 115)   # warm neutral fallback
+
+
+# Route for Text-to-Clothes generation
+@app.post('/text-to-clothes')
+async def text_to_clothes_endpoint(
+    reference: UploadFile = File(...),
+    prompt: str = Form(...),
+    strength: str = Form('0.95'),
+):
+    """Replace a specific garment described in the prompt while keeping the
+    face, pose, hands, hair, and background pixel-perfect.
+
+    New pipeline (no more whole-image regeneration):
+      1. SegFormer parses the image into per-pixel body / clothing labels.
+      2. Garment keywords in the prompt (`shirt`, `dress`, `pants`, …) decide
+         which labels to mask. Default = upper-clothes.
+      3. Real masked-latent inpainting only regenerates inside that mask.
+         Face, body shape, hands, and background are never touched.
+      4. Hard pixel-level composite as a final safety net.
+    """
+    if sd_pipe is None:
+        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
+
+    start = time.perf_counter()
+    print(f"👗 Text-to-Clothes: '{prompt}'")
+
+    try:
+        reference_bytes = await reference.read()
+        strength_val = max(0.5, min(1.0, float(strength)))
+
+        # ── Load reference ───────────────────────────────────────────────────
+        original_rgba  = Image.open(io.BytesIO(reference_bytes)).convert('RGBA')
+        original_alpha = original_rgba.split()[3]
+        reference_rgb  = Image.new("RGB", original_rgba.size, (255, 255, 255))
+        reference_rgb.paste(original_rgba, mask=original_alpha)
+        original_size  = reference_rgb.size
+
+        # ── Detect garment labels + target body region from prompt ───────────
+        labels = _detect_garment_labels(prompt)
+        region = _detect_garment_region(prompt)
+        all_labels = set(labels) | (region or set())
+        print(f"   🏷️  Garment labels: {sorted(labels)}  region: {sorted(region) if region else '—'}")
+
+        # ── Build pixel-precise garment mask covering the union ──────────────
+        print("   🎭 Building garment mask…")
+        garment_mask = _build_garment_mask(reference_rgb, all_labels)
+
+        if int(np.array(garment_mask).max()) < 30:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not find a matching body region in the reference image.",
+            )
+
+        # ── Pre-fill the masked region with the parsed colour ────────────────
+        # Gives SD a strong colour+shape signal so e.g. "red trousers" on a
+        # shorts model produces actual red trousers covering the legs, not a
+        # tinted version of the existing shorts.
+        color_rgb = _parse_color_from_prompt(prompt)
+        print(f"   🎨 Pre-fill colour: {color_rgb}")
+        prefilled_rgb = _color_prefill(reference_rgb, garment_mask, color_rgb)
+
+        # ── Resize to 512×512 for SD ─────────────────────────────────────────
+        ref_512_orig = reference_rgb.resize((512, 512), Image.LANCZOS)
+        ref_512      = prefilled_rgb.resize((512, 512), Image.LANCZOS)
+        mask_512     = garment_mask.resize((512, 512), Image.BILINEAR)
+
+        # ── Prompts ──────────────────────────────────────────────────────────
+        positive = (
+            f"a person wearing {prompt}, "
+            "fashion photography, photorealistic, sharp focus, "
+            "studio lighting, detailed fabric texture, high quality, 8k"
+        )
+        negative = (
+            "deformed, distorted, blurry, low quality, watermark, text, logo, "
+            "extra limbs, bad anatomy, ugly, oversaturated, cartoon, illustration"
+        )
+        print(f"   📝 Prompt: {positive}")
+        print(f"   🎚️ Strength: {strength_val}")
+
+        # ── Real masked-latent inpainting ────────────────────────────────────
+        print("   🎨 Running masked-latent inpainting…")
+        result_512 = _masked_latent_inpaint(
+            image_pil       = ref_512,
+            mask_pil        = mask_512,
+            prompt          = positive,
+            negative_prompt = negative,
+            strength        = strength_val,
+            num_steps       = 30,
+            guidance        = 8.0,
+        )
+
+        # ── Hard pixel-level composite (safety net) ──────────────────────────
+        # Blend against the *original* (not pre-filled) so mask edges don't
+        # leak the pre-fill colour onto skin/background.
+        ref_np    = np.array(ref_512_orig).astype(np.float32)
+        result_np = np.array(result_512).astype(np.float32)
+        m_np      = np.array(mask_512).astype(np.float32) / 255.0
+        final_np  = ref_np * (1.0 - m_np[..., None]) + result_np * m_np[..., None]
+        composited = Image.fromarray(final_np.astype(np.uint8))
+
+        # ── Restore original resolution and alpha channel ────────────────────
+        composited = composited.resize(original_size, Image.LANCZOS).convert('RGBA')
+        composited.putalpha(original_alpha)
+
+        byte_io = io.BytesIO()
+        composited.save(byte_io, 'PNG')
+        byte_io.seek(0)
+
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        await log_generation_event(
+            endpoint="text-to-clothes",
+            status="success",
+            duration_ms=elapsed_ms,
+            metadata={"prompt": prompt, "labels": sorted(labels), "strength": strength_val},
+        )
+        print(f"   ✅ Text-to-Clothes complete in {elapsed_ms}ms")
+        return StreamingResponse(byte_io, media_type='image/png')
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in text-to-clothes: {e}")
+        await log_generation_event(
+            endpoint="text-to-clothes",
+            status="error",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Route for Style Bending
 @app.post('/blend-styles')
@@ -681,7 +1522,17 @@ async def blend_styles(
     outpaint1: str = Form('false'),
     outpaint2: str = Form('false'),
 ):
-    """Projects two images to latent space and blends them"""
+    """Stylebend: blend two fashion images in StyleGAN-Human latent space.
+
+    Pipeline:
+      1. Project each image to the W+ latent space via GAN inversion (400 steps).
+         Results are cached by MD5(bytes + outpaint flag) so slider moves are fast.
+      2. If outpaint is enabled, extend the image to 512×1024 full-body canvas
+         before inversion (improves results for bust/half-body shots).
+      3. Interpolate linearly across 21 alpha values (0.0 → 1.0 in 0.05 steps)
+         and return all frames as base64-encoded JPEG strings.
+      The frontend slider selects which pre-computed frame to display.
+    """
     if stylegan_model is None:
         raise HTTPException(status_code=500, detail="StyleGAN model not loaded")
 
@@ -759,15 +1610,71 @@ async def blend_styles(
 async def generate_human_endpoint(
     prompt: str = Form('a fashion model wearing stylish clothing, full body, high quality, detailed'),
     negative_prompt: str = Form('low quality, blurry, distorted, deformed, bad anatomy, extra limbs, ugly'),
-    steps: str = Form('50'),
+    steps: str = Form('35'),
     guidance: str = Form('7.5'),
 ):
-    """Generates a human figure from a text prompt using Stable Diffusion"""
-    if sd_pipe is None:
+    """Generate a full-body fashion model image from a text prompt using SD txt2img.
+
+    Colour anchoring: detected colour keywords are repeated 4× paired with the
+    garment noun (e.g. "black suit, black suit, black suit, black suit, …") before
+    the main prompt to counter SD's tendency to apply colours to skin or hair.
+    Dark colours also push light-clothing tokens into the negative prompt.
+    Background is removed with rembg and replaced with solid white so the result
+    can be used as a reference layer without an unwanted scene background.
+    """
+    if txt2img_pipe is None:
         raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
 
-    prompt = prompt + ", pure white background, white backdrop, clean studio"
-    negative_prompt = negative_prompt + ", complex background, messy background, outdoors, scenery, landscape"
+    _COLOR_RE = re.compile(
+        r'\b(black|white|red|blue|green|yellow|purple|pink|orange|brown|gr[ae]y|navy|'
+        r'burgundy|maroon|teal|cyan|magenta|beige|cream|gold|silver|dark|light|bright|'
+        r'pastel|neon|olive|coral|turquoise|indigo|violet|crimson|scarlet|azure|ivory|'
+        r'charcoal|tan|khaki|lime)\b',
+        re.IGNORECASE,
+    )
+    _DARK_COLORS = {
+        'black', 'dark', 'navy', 'charcoal', 'burgundy', 'maroon',
+        'indigo', 'violet', 'crimson', 'scarlet', 'teal', 'olive',
+    }
+
+    color_hits = list(dict.fromkeys(m.lower() for m in _COLOR_RE.findall(prompt)))
+
+    if color_hits:
+        # Anchor each colour to a clothing noun before repeating.
+        # Bare colour words ("black, black, black") get applied to whatever the model
+        # associates first — usually skin or hair. Pairing with a clothing noun
+        # ("black clothing, black clothing, …") locks the colour to the garment.
+        # We also try to extract the specific clothing item from the user's prompt
+        # (e.g. "suit", "dress") so the repetition is even more precise.
+        _GARMENT_RE = re.compile(
+            r'\b(suit|dress|gown|jacket|coat|shirt|pants|trousers|blouse|skirt|'
+            r'jeans|blazer|hoodie|sweater|uniform|robe|outfit|attire|top|wear)\b',
+            re.IGNORECASE,
+        )
+        garment_match = _GARMENT_RE.search(prompt)
+        garment = garment_match.group(1).lower() if garment_match else 'clothing'
+
+        anchored = [f"{c} {garment}" for c in color_hits[:2]]
+        repeated_colors = ', '.join(phrase for phrase in anchored for _ in range(4))
+        prompt = repeated_colors + ', ' + prompt
+
+    # For dark colours, push white/light tones away via the negative prompt.
+    dark_found = [c for c in color_hits if c in _DARK_COLORS]
+    if dark_found:
+        negative_prompt = (
+            "white clothing, white dress, white shirt, white suit, white outfit, "
+            "light colored clothing, pale outfit, bright clothing, "
+            + negative_prompt
+        )
+
+    prompt = prompt + ", professional fashion photography, photorealistic, sharp focus"
+    negative_prompt = (
+        negative_prompt
+        + ", outdoors, complex background, scenery, landscape, "
+        + "extra limbs, extra arms, extra legs, missing limbs, floating limbs, "
+        + "duplicate, cloned face, disfigured, gross proportions, mutation, "
+        + "watermark, text, signature, jpeg artifacts"
+    )
 
     print(f"🧑 Starting Text-to-Human Generation...")
     print(f"📝 Prompt: {prompt}")
@@ -775,30 +1682,31 @@ async def generate_human_endpoint(
     start = time.perf_counter()
 
     try:
-        # Create a blank white canvas — SD inpainting will replace everything
         width, height = 512, 768
-        blank_image = Image.new("RGB", (width, height), (255, 255, 255))
-        mask_image = Image.new("L", (width, height), 255)  # All-white mask = generate everywhere
-
-        result = sd_pipe(
+        result = txt2img_pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
-            image=blank_image,
-            mask_image=mask_image,
-            strength=1.0,              # Full generation from noise
             num_inference_steps=int(steps),
             guidance_scale=float(guidance),
+            width=width,
+            height=height,
         ).images[0]
 
-        # Try to remove the background
+        # Try to remove the background and place on solid white
         try:
-            from rembg import remove as rembg_remove
             print("   🪄 Removing background using rembg...")
             img_bytes_io = io.BytesIO()
             result.save(img_bytes_io, format="PNG")
-            result_bytes = rembg_remove(img_bytes_io.getvalue())
-            result = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
-            print("   ✅ Background removed successfully.")
+            result_bytes = rembg_remove_cpu(img_bytes_io.getvalue())
+            img_rgba = Image.open(io.BytesIO(result_bytes)).convert("RGBA")
+            
+            # Place the cutout (alpha-composited) on a pure WHITE background
+            # This ensures frontend bounds logic doesn't shrink the canvas to the silhouette
+            white_bg = Image.new("RGBA", img_rgba.size, (255, 255, 255, 255))
+            white_bg.paste(img_rgba, mask=img_rgba.split()[3])
+            result = white_bg.convert("RGB")
+            
+            print("   ✅ Background removed and replaced with solid white.")
         except Exception as e:
             print(f"   ⚠️ Background removal failed or not installed ({e}) — keeping original background.")
 
@@ -829,34 +1737,165 @@ async def generate_human_endpoint(
 # Route for AI Color Suggestions
 @app.post('/suggest-colors')
 async def suggest_colors_endpoint(prompt: str = Form(...)):
-    """Suggests a color palette from a text prompt using low-step Stable Diffusion"""
-    if sd_pipe is None:
-        raise HTTPException(status_code=500, detail="Stable Diffusion model not loaded")
-    
-    print(f"🎨 Suggesting colors for: {prompt}")
+    """Generate a 5-swatch colour palette PNG from a text prompt.
+
+    Algorithm (no generative AI):
+      1. Match emotion/aesthetic/colour keywords against HUE_KEYWORDS to get
+         (base_hue, saturation, lightness_min, lightness_max) tuples.
+      2. Average all matched tuples into a single emotional colour base.
+      3. Build 5 analogous hues (±12°, ±22° around the base) spanning the
+         lightness range, using slightly varying saturation for harmony.
+      4. Render as a clean 5-swatch PNG strip and return it as a StreamingResponse.
+    Falls back to an MD5-hash-derived hue if no keywords are matched.
+    """
+    import colorsys, hashlib
+    from PIL import ImageDraw
+
+    print(f"\U0001f3a8 Suggesting colors for: {prompt}")
     start = time.perf_counter()
-    
+
     try:
-        # Create a small blank canvas for speed
-        width, height = 256, 256
-        blank_image = Image.new("RGB", (width, height), (255, 255, 255))
-        mask_image = Image.new("L", (width, height), 255)
-        
-        # Guide towards abstract color blobs
-        enhanced_prompt = f"abstract color palette study, vibrant color blobs, {prompt}, high quality"
-        
-        # Low steps for fast "vibe" generation
-        result = sd_pipe(
-            prompt=enhanced_prompt,
-            image=blank_image,
-            mask_image=mask_image,
-            strength=1.0,
-            num_inference_steps=2, 
-            guidance_scale=7.5,
-        ).images[0]
-        
+        # ── Comprehensive keyword → (base_hue, saturation, lightness_min, lightness_max) ──
+        # Emotions are primary. Low sat + low lightness = muted/sad. High sat + high lightness = joyful.
+        HUE_KEYWORDS = [
+            # Sadness / Depression / Grief
+            ("sad", 225, 25, 25, 45), ("sadness", 225, 25, 25, 45),
+            ("lonely", 220, 20, 22, 42), ("loneliness", 220, 20, 22, 42), ("alone", 215, 18, 25, 45),
+            ("depress", 230, 20, 15, 35), ("grief", 220, 22, 18, 35), ("sorrow", 225, 25, 20, 40),
+            ("heartbreak", 340, 30, 22, 42), ("heartbroken", 340, 30, 22, 42),
+            ("melancholy", 225, 22, 25, 45), ("hopeless", 220, 15, 18, 32),
+            ("despair", 225, 18, 12, 30), ("empty", 210, 10, 28, 48),
+            ("numb", 215, 8, 28, 45), ("broken", 215, 18, 20, 38),
+            ("crying", 215, 25, 25, 45), ("tears", 205, 28, 28, 48),
+            ("wistful", 215, 22, 32, 52), ("mournful", 225, 20, 18, 35),
+            ("regret", 220, 22, 25, 42), ("miss", 220, 20, 28, 48),
+            # Happiness / Joy
+            ("happy", 50, 85, 60, 80), ("happiness", 50, 85, 60, 80),
+            ("joy", 45, 90, 62, 82), ("joyful", 45, 90, 62, 82),
+            ("excited", 25, 90, 55, 75), ("cheerful", 50, 80, 65, 82),
+            ("elated", 48, 88, 62, 80), ("bliss", 55, 80, 68, 85),
+            ("euphoria", 40, 92, 60, 78), ("celebrate", 35, 88, 58, 78),
+            ("playful", 45, 85, 62, 80), ("fun", 30, 88, 60, 78),
+            ("laugh", 48, 82, 65, 82), ("bright", 50, 80, 68, 85),
+            ("sunshine", 52, 88, 65, 82), ("radiant", 48, 88, 65, 82),
+            # Anger / Rage
+            ("angry", 0, 85, 35, 55), ("anger", 0, 85, 35, 55),
+            ("rage", 0, 90, 25, 42), ("furious", 5, 88, 28, 45),
+            ("frustrated", 10, 70, 35, 52), ("frustrat", 10, 70, 35, 52),
+            ("hate", 355, 80, 25, 42), ("violent", 0, 88, 22, 40),
+            # Fear / Anxiety
+            ("fear", 250, 35, 18, 38), ("scared", 245, 30, 20, 40),
+            ("anxious", 240, 28, 25, 45), ("anxiety", 240, 30, 22, 42),
+            ("nervous", 235, 25, 28, 48), ("panic", 10, 60, 28, 48),
+            ("dread", 240, 25, 15, 32), ("horror", 240, 20, 12, 28),
+            ("terror", 235, 22, 12, 28), ("stressed", 235, 25, 25, 45),
+            ("stress", 235, 25, 25, 45), ("worried", 235, 22, 28, 48),
+            ("worry", 235, 22, 28, 48),
+            # Calm / Peace
+            ("calm", 195, 40, 55, 75), ("calming", 195, 40, 55, 75),
+            ("peace", 175, 35, 55, 75), ("peaceful", 175, 35, 55, 75),
+            ("serene", 190, 38, 58, 78), ("tranquil", 185, 35, 58, 78),
+            ("relax", 185, 38, 55, 75), ("zen", 145, 30, 50, 70),
+            ("gentle", 185, 30, 62, 80), ("quiet", 210, 18, 48, 68),
+            # Romance / Love
+            ("love", 345, 70, 55, 78), ("loving", 345, 70, 55, 78),
+            ("romantic", 340, 60, 60, 80), ("passion", 350, 85, 45, 65),
+            ("tender", 345, 50, 65, 82), ("heart", 355, 70, 55, 75),
+            # Mystery / Darkness
+            ("myster", 270, 50, 15, 35), ("dark", 240, 20, 10, 28),
+            ("shadow", 235, 18, 12, 30), ("eerie", 260, 35, 18, 35),
+            ("gothic", 280, 40, 12, 30), ("haunted", 250, 25, 15, 32),
+            ("noir", 220, 12, 10, 28), ("sinister", 255, 35, 12, 28),
+            # Hope / Optimism
+            ("hope", 165, 55, 50, 72), ("hopeful", 165, 55, 50, 72),
+            ("dream", 270, 40, 60, 82), ("dreamy", 280, 40, 60, 82),
+            ("inspire", 190, 60, 50, 72), ("ambit", 195, 58, 48, 68),
+            # Energy / Power
+            ("energy", 30, 90, 52, 72), ("power", 270, 70, 28, 52),
+            ("bold", 0, 80, 38, 58), ("fierce", 10, 85, 32, 52),
+            ("intense", 240, 60, 25, 45), ("vibrant", 35, 90, 55, 75),
+            # Nostalgia
+            ("nostalgi", 30, 42, 50, 68), ("memory", 35, 35, 52, 70),
+            ("vintage", 35, 40, 50, 65), ("retro", 28, 55, 48, 68),
+            # Aesthetics
+            ("cyberpunk", 280, 85, 40, 70), ("neon", 290, 90, 50, 75),
+            ("gloomy", 225, 22, 22, 42), ("moody", 235, 28, 22, 42),
+            ("dreary", 220, 18, 20, 38), ("pastel", 300, 30, 75, 90),
+            ("boho", 30, 55, 55, 70), ("ethereal", 270, 35, 65, 85),
+            ("magical", 290, 60, 50, 75), ("fairy", 295, 45, 65, 85),
+            ("elegant", 260, 30, 40, 60), ("luxury", 45, 70, 45, 65),
+            ("minimal", 210, 15, 50, 75), ("futuristic", 200, 70, 40, 65),
+            ("industrial", 210, 20, 28, 48), ("grunge", 35, 30, 22, 42),
+            # Nature
+            ("grass", 110, 55, 35, 65), ("green", 120, 60, 30, 65),
+            ("forest", 130, 50, 25, 55), ("ocean", 200, 75, 35, 65),
+            ("sky", 205, 70, 50, 80), ("sea", 195, 70, 35, 65),
+            ("sunset", 20, 85, 50, 70), ("fire", 10, 90, 45, 65),
+            ("autumn", 25, 80, 45, 65), ("snow", 210, 20, 85, 95),
+            ("winter", 220, 38, 42, 62), ("spring", 90, 55, 55, 75),
+            ("summer", 50, 70, 60, 80), ("tropical", 165, 70, 45, 65),
+            ("desert", 35, 65, 55, 75), ("mountain", 220, 25, 35, 55),
+            ("earth", 30, 45, 35, 55), ("mint", 160, 55, 60, 80),
+            # Direct colors
+            ("red", 0, 80, 40, 65), ("pink", 340, 70, 65, 85),
+            ("rose", 350, 65, 55, 75), ("orange", 25, 85, 50, 70),
+            ("yellow", 55, 85, 55, 75), ("gold", 45, 80, 50, 65),
+            ("purple", 275, 70, 35, 60), ("violet", 265, 75, 40, 65),
+            ("lavender", 260, 50, 70, 85), ("indigo", 245, 70, 35, 55),
+            ("blue", 215, 75, 40, 65), ("navy", 225, 65, 25, 45),
+            ("teal", 175, 65, 35, 55), ("cyan", 185, 75, 45, 65),
+            ("brown", 25, 50, 30, 50), ("beige", 35, 40, 70, 85),
+            ("gray", 220, 10, 40, 65), ("grey", 220, 10, 40, 65),
+            ("charcoal", 220, 15, 15, 30), ("black", 240, 10, 8, 20),
+            ("white", 0, 0, 88, 97), ("silver", 215, 15, 65, 80),
+        ]
+
+        prompt_lower = prompt.lower()
+        matched = []
+        for kw, hue, sat, lmin, lmax in HUE_KEYWORDS:
+            if kw in prompt_lower:
+                matched.append((hue, sat, lmin, lmax))
+
+        if not matched:
+            h = int(hashlib.md5(prompt_lower.encode()).hexdigest(), 16)
+            base_hue = h % 360
+            matched.append((base_hue, 45, 35, 62))
+
+        # Blend all matched keywords into one unified emotional base
+        avg_hue = sum(m[0] for m in matched) / len(matched)
+        avg_sat = sum(m[1] for m in matched) / len(matched)
+        avg_lmin = sum(m[2] for m in matched) / len(matched)
+        avg_lmax = sum(m[3] for m in matched) / len(matched)
+        base_hue = int(avg_hue)
+        sat = int(avg_sat)
+        lmin = int(avg_lmin)
+        lmax = int(avg_lmax)
+
+        # Analogous harmony spanning the emotional lightness range
+        NUM_SWATCHES = 5
+        offsets = [0, 12, -12, 22, -22]
+        swatches = []
+        for j, offset in enumerate(offsets):
+            hue = (base_hue + offset) % 360
+            lightness = lmin + (lmax - lmin) * (j / (NUM_SWATCHES - 1))
+            s = max(8, min(95, sat + (j - 2) * 4))
+            swatches.append((hue, s, lightness))
+        # Render as a clean palette strip PNG
+        sw, sh, pad = 110, 110, 12
+        total_w = NUM_SWATCHES * sw + (NUM_SWATCHES + 1) * pad
+        total_h = sh + 2 * pad
+        palette_img = Image.new("RGB", (total_w, total_h), (240, 240, 245))
+        draw = ImageDraw.Draw(palette_img)
+
+        for i, (h, s, l) in enumerate(swatches[:NUM_SWATCHES]):
+            r, g, b = colorsys.hls_to_rgb(h / 360, l / 100, s / 100)
+            rgb = (int(r * 255), int(g * 255), int(b * 255))
+            x = pad + i * (sw + pad)
+            y = pad
+            draw.rectangle([x, y, x + sw, y + sh], fill=rgb)
+
         byte_io = io.BytesIO()
-        result.save(byte_io, 'PNG')
+        palette_img.save(byte_io, 'PNG')
         byte_io.seek(0)
         await log_generation_event(
             endpoint="suggest-colors",
@@ -879,6 +1918,9 @@ async def suggest_colors_endpoint(prompt: str = Form(...)):
 
 @app.get('/health/db')
 async def health_db():
+    """Liveness/readiness probe: returns DB connection status.
+    Used by deployment health checks and the frontend's startup retry loop.
+    """
     mongo: MongoManager = app.state.mongo
     is_connected = mongo.db is not None
     payload = {
@@ -893,6 +1935,10 @@ async def health_db():
 
 @app.post('/auth/signup')
 async def signup(payload: SignupRequest):
+    """Register a new user. Passwords are hashed with Argon2id before storage.
+    Returns the new user object and a JWT token (also set as a cookie).
+    Raises 409 if the email is already registered.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -914,13 +1960,19 @@ async def signup(payload: SignupRequest):
     created_user = await mongo.db["users"].find_one({"_id": result.inserted_id})
 
     token = create_access_token(str(result.inserted_id))
-    response = JSONResponse(serialize_user(created_user))
+    response = JSONResponse({"user": serialize_user(created_user), "token": token})
     set_auth_cookie(response, token)
     return response
 
 
 @app.post('/auth/login')
 async def login(payload: LoginRequest):
+    """Authenticate a user with email + password (Argon2id verify).
+    If the stored hash is outdated (Argon2 parameter upgrade), it is rehashed
+    transparently. Returns user + JWT on success; 401 on wrong credentials.
+    The lookup + verify always runs even when the email is unknown to prevent
+    timing-based user enumeration.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -943,13 +1995,14 @@ async def login(payload: LoginRequest):
         )
 
     token = create_access_token(str(user_doc["_id"]))
-    response = JSONResponse(serialize_user(user_doc))
+    response = JSONResponse({"user": serialize_user(user_doc), "token": token})
     set_auth_cookie(response, token)
     return response
 
 
 @app.post('/auth/logout')
 async def logout():
+    """Clear the auth cookie. The client is also expected to discard its local JWT."""
     response = JSONResponse({"logout": True})
     clear_auth_cookie(response)
     return response
@@ -957,6 +2010,7 @@ async def logout():
 
 @app.get('/auth/me')
 async def auth_me(current_user: dict[str, Any] = Depends(get_current_user)):
+    """Return the authenticated user's profile. Used for session restore on app mount."""
     return JSONResponse(serialize_user(current_user))
 
 
@@ -1056,6 +2110,11 @@ async def change_password(
 
 @app.post('/projects')
 async def create_project(project: ProjectCreate, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Create a new empty project for the authenticated user.
+    Raises 409 if a project with the same name (case-insensitive) already exists.
+    The DuplicateKeyError catch guards against the race condition where two concurrent
+    requests pass the conflict check simultaneously before either inserts.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -1086,17 +2145,26 @@ async def create_project(project: ProjectCreate, current_user: dict[str, Any] = 
 
 @app.get('/projects')
 async def list_projects(current_user: dict[str, Any] = Depends(get_current_user)):
+    """Return all projects for the authenticated user, sorted newest first.
+    layersSnapshot is excluded from the projection to keep the list payload small.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
 
-    cursor = mongo.db["projects"].find({"userId": str(current_user["_id"])}).sort("updatedAt", DESCENDING)
-    items = [serialize_project(doc) async for doc in cursor]
+    cursor = mongo.db["projects"].find(
+        {"userId": str(current_user["_id"])},
+        projection={"layersSnapshot": 0},
+    ).sort("updatedAt", DESCENDING)
+    items = [serialize_project_summary(doc) async for doc in cursor]
     return JSONResponse(items)
 
 
 @app.get('/projects/item/{project_id}')
 async def get_project(project_id: str, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Fetch a single project by ID (includes layersSnapshot for canvas hydration).
+    userId check in the query ensures users cannot access each other's projects.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -1110,6 +2178,11 @@ async def get_project(project_id: str, current_user: dict[str, Any] = Depends(ge
 
 @app.put('/projects/{project_id}')
 async def save_project(project_id: str, payload: ProjectSave, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Persist the full canvas state for a project (name, thumbnail, layersSnapshot).
+    Called by the auto-save debouncer in App.jsx. layersSnapshot is a JSON string
+    containing all layer canvasData, so it can be large — sent as a plain string to
+    avoid MongoDB schema migrations when the layer structure changes.
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -1143,6 +2216,9 @@ async def save_project(project_id: str, payload: ProjectSave, current_user: dict
 
 @app.patch('/projects/{project_id}/rename')
 async def rename_project(project_id: str, payload: ProjectRename, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Rename a project. Performs the same case-insensitive conflict check as create/save,
+    but excludes the project being renamed from the conflict check (self-rename is allowed).
+    """
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")
@@ -1170,6 +2246,7 @@ async def rename_project(project_id: str, payload: ProjectRename, current_user: 
 
 @app.delete('/projects/{project_id}')
 async def delete_project(project_id: str, current_user: dict[str, Any] = Depends(get_current_user)):
+    """Permanently delete a project. Raises 404 if not found or not owned by the user."""
     mongo: MongoManager = app.state.mongo
     if mongo.db is None:
         raise HTTPException(status_code=503, detail="Database is not connected")

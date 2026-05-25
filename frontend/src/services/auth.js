@@ -1,40 +1,66 @@
-import { apiRequest } from './api';
+/**
+ * auth.js — Authentication service.
+ *
+ * All functions here communicate with the /auth/* backend routes.
+ * The JWT returned on login/signup is persisted via tokenStore so that
+ * subsequent calls to apiRequest() automatically include it as a Bearer token.
+ */
+import { apiRequest, tokenStore } from './api';
 
 /**
- * Register a new account and start an authenticated session.
+ * Create a new account and immediately sign in.
+ * Stores the returned JWT so the user is authenticated for subsequent requests.
  */
 export async function signup(email, password, displayName) {
-  return apiRequest('/auth/signup', {
+  const data = await apiRequest('/auth/signup', {
     method: 'POST',
     body: JSON.stringify({ email, password, displayName }),
   });
+  if (data?.token) tokenStore.set(data.token);
+  return data?.user ?? data;
 }
 
 /**
- * Sign in with email + password.
+ * Authenticate with email + password.
+ * Stores the returned JWT on success.
  */
 export async function login(email, password) {
-  return apiRequest('/auth/login', {
+  const data = await apiRequest('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
+  if (data?.token) tokenStore.set(data.token);
+  return data?.user ?? data;
 }
 
-/** Remove the current session. */
+/**
+ * Sign out the current user.
+ * The token is removed from localStorage first so that even if the server
+ * request fails, the client is logged out immediately.
+ */
 export async function logout() {
-  await apiRequest('/auth/logout', { method: 'POST' });
+  tokenStore.clear();
+  // The backend endpoint clears the auth cookie; failure is non-fatal.
+  await apiRequest('/auth/logout', { method: 'POST' }).catch(() => {});
 }
 
-/** Returns current authenticated user or null if not signed in. */
+/**
+ * Fetch the currently authenticated user's profile.
+ * Returns null (and clears the stored token) if the token is missing or invalid.
+ * Used on app startup to restore session state without redirecting to login.
+ */
 export async function getUser() {
+  if (!tokenStore.get()) return null;
   try {
     return await apiRequest('/auth/me');
   } catch {
+    // Token may be expired or revoked — discard it to force re-login.
+    tokenStore.clear();
     return null;
   }
 }
 
-/** @returns {boolean} */
+/** Returns true if the stored token represents a valid, live session. */
 export async function isAuthenticated() {
   const user = await getUser();
   return !!user;

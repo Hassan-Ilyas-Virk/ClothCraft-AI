@@ -1,3 +1,13 @@
+/**
+ * BrushControls — floating panel for brush/eraser size.
+ *
+ * Shown/hidden by the `visible` prop (CSS class toggle) so it stays mounted
+ * and doesn't reset the slider value on tool switch.
+ * `toolName` is used as the label so the panel reads "Eraser Size" for the
+ * eraser tool and "Brush Size" for the brush tool.
+ * The preview dot is capped at 50 px so it stays inside the panel regardless
+ * of brushSize (which can go up to 100 canvas pixels).
+ */
 import React from 'react';
 import './BrushControls.css';
 

@@ -1,4 +1,20 @@
+/**
+ * PatternMakerModal — tile the active drawing layer into a seamless pattern.
+ *
+ * Two-step workflow:
+ *   1. Pattern: the layer image is tiled on a canvas at the chosen scale /
+ *      rotation / spacing / background color and previewed inline.
+ *   2. Refine (optional): the tiled pattern is sent to /refine-pattern
+ *      (SD img2img at the selected strength) to add realistic texture and
+ *      coherence across tiles.
+ *
+ * Prompt presets provide sensible SD prompt suffixes for common aesthetics
+ * (Realistic, Artistic, Flat Design, Perfect Shapes, Vintage, Custom).
+ *
+ * onApply receives a Blob of the final (optionally refined) PNG pattern.
+ */
 import React, { useState, useEffect, useRef } from 'react';
+import API_BASE, { NGROK_HEADERS } from '../config.js';
 import './PatternMakerModal.css';
 
 const PatternMakerModal = ({
@@ -103,29 +119,28 @@ const PatternMakerModal = ({
         const width = canvas.width;
         const height = canvas.height;
 
-        // Clear canvas
         ctx.clearRect(0, 0, width, height);
 
+        // Fill background colour unless the user wants a transparent canvas.
         if (!isTransparent) {
             ctx.fillStyle = bgColor;
             ctx.fillRect(0, 0, width, height);
         }
 
-        // Pattern logic
-        const patternWidth = img.width * scale;
+        const patternWidth  = img.width  * scale;
         const patternHeight = img.height * scale;
 
-        // Calculate effective spacing
-        const effSpacingX = patternWidth + spacingX;
+        // Effective spacing = tile size + extra gap set by the user.
+        const effSpacingX = patternWidth  + spacingX;
         const effSpacingY = patternHeight + spacingY;
 
-        // Calculate number of tiles needed
-        // Add buffer for rotation
+        // Extend the tiling range beyond the canvas edges by one tile's worth of
+        // buffer so rotated tiles that stick out past the edge still fill corners.
         const buffer = Math.max(patternWidth, patternHeight);
         const startX = -buffer;
         const startY = -buffer;
-        const endX = width + buffer;
-        const endY = height + buffer;
+        const endX   = width  + buffer;
+        const endY   = height + buffer;
 
         ctx.save();
 
@@ -133,21 +148,15 @@ const PatternMakerModal = ({
             for (let x = startX; x < endX; x += effSpacingX) {
                 ctx.save();
 
-                // Translate to center of tile
-                const cx = x + patternWidth / 2;
+                // Rotate each tile around its own center so the pattern grid
+                // stays evenly spaced regardless of rotation angle.
+                const cx = x + patternWidth  / 2;
                 const cy = y + patternHeight / 2;
-
                 ctx.translate(cx, cy);
                 ctx.rotate((rotation * Math.PI) / 180);
 
-                // Draw image centered
-                ctx.drawImage(
-                    img,
-                    -patternWidth / 2,
-                    -patternHeight / 2,
-                    patternWidth,
-                    patternHeight
-                );
+                // Draw centered on the translated origin.
+                ctx.drawImage(img, -patternWidth / 2, -patternHeight / 2, patternWidth, patternHeight);
 
                 ctx.restore();
             }
@@ -161,6 +170,9 @@ const PatternMakerModal = ({
 
         setIsRefining(true);
         try {
+            // Export the tiled canvas as a PNG blob and send it to the SD refiner.
+            // SD img2img at moderate strength adds cross-tile coherence and realistic
+            // fabric texture while preserving the overall tile layout.
             const patternData = canvasRef.current.toDataURL('image/png');
             const result = await onRefine({
                 image: patternData,
@@ -224,8 +236,9 @@ const PatternMakerModal = ({
             formData.append('prompt', elementPrompt);
             formData.append('strength', strength.toString());
 
-            const response = await fetch('http://127.0.0.1:5001/inpaint', {
+            const response = await fetch(`${API_BASE}/inpaint`, {
                 method: 'POST',
+                headers: NGROK_HEADERS,
                 body: formData
             });
 
@@ -275,7 +288,7 @@ const PatternMakerModal = ({
     };
 
     const handleApply = () => {
-        // If we have a refined image, use that. Otherwise use the generated pattern.
+        // Prefer the SD-refined image if available; fall back to the raw tiled canvas.
         const finalImage = refinedImage || canvasRef.current.toDataURL('image/png');
         onApply(finalImage);
         onClose();

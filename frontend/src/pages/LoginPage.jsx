@@ -72,7 +72,10 @@ const LoginPage = ({ onLogin, onSignup, onGoogleLogin }) => {
     e.preventDefault();
     setError('');
     if (!email || !password) { setError('Please fill in all fields.'); return; }
-    if (mode === 'signup' && !name) { setError('Please enter your name.'); return; }
+    if (mode === 'signup') {
+      if (!name) { setError('Please enter your name.'); return; }
+      if (password.length < 8) { setError('Password must be at least 8 characters.'); return; }
+    }
     setLoading(true);
     try {
       if (mode === 'login') {
@@ -94,7 +97,7 @@ const LoginPage = ({ onLogin, onSignup, onGoogleLogin }) => {
 
   return (
     <div className="login-root">
-      <Iridescence color={[0.77, 0.52, 0.99]} speed={1.2} amplitude={0.15} />
+      <Iridescence color={IRIDESCENCE_COLOR} speed={1.2} amplitude={0.15} />
 
       {/* Left Column: Form */}
       <div className="login-side">
@@ -205,19 +208,8 @@ const LoginPage = ({ onLogin, onSignup, onGoogleLogin }) => {
             </button>
           </form>
 
-          {/* Footer switch */}
-          <p className="login-switch">
-            {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
-            <button
-              className="login-switch-btn"
-              type="button"
-              onClick={() => switchMode(mode === 'login' ? 'signup' : 'login')}
-            >
-               Sign up
-            </button>
-          </p>
 
-          <button className="login-guest-btn" type="button">
+          <button className="login-guest-btn" type="button" onClick={onGuest}>
             Continue as guest
             <ArrowRight size={18} />
           </button>

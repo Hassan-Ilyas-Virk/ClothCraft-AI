@@ -232,7 +232,14 @@
   align-items: center;
   justify-content: center;
   gap: 16px;
+  padding: 32px;
 }
+
+.clothify-loading .progress-container {
+  width: 100%;
+  max-width: 420px;
+}
+
 
 .clothify-spinner {
   width: 48px;

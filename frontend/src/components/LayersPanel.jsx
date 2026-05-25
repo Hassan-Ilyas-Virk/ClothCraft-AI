@@ -1,3 +1,19 @@
+/**
+ * LayersPanel — right-side panel showing the layer stack.
+ *
+ * Layout (top to bottom in the panel, top to bottom visually on canvas):
+ *   [Drawing layers — draggable, in reverse render order so top is at panel top]
+ *   [Reference layer — pinned at the bottom, not draggable]
+ *
+ * The layers array from useLayerManager is ordered bottom-to-top for rendering
+ * (layers[0] is drawn first = reference). The panel reverses drawing layers so
+ * the topmost canvas layer appears at the top of the list, matching Photoshop
+ * conventions that users expect.
+ *
+ * Drag-and-drop reordering uses gap elements between layer items as drop
+ * targets, allowing precise insertion between any two layers without relying
+ * on the layer items themselves to compute a split-point from cursor position.
+ */
 import React, { useState } from 'react';
 import { Plus, Minimize2, Maximize2 } from 'lucide-react';
 import LayerItem from './LayerItem';
@@ -18,7 +34,10 @@ const LayersPanel = ({
     onUpdateLayer,
     onStylebend,
     onStylebendFromLayer,
-    onGenerateHuman
+    onGenerateHuman,
+    onTextToClothes,
+    onExtractDoodle,
+    onMergeDown,
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
     const [draggedLayerId, setDraggedLayerId] = useState(null);
@@ -27,13 +46,27 @@ const LayersPanel = ({
     const activeLayer = layers.find(l => l.id === activeLayerId);
     const referenceLayer = layers.find(l => l.type === 'reference');
     const drawingLayers = layers.filter(l => l.type !== 'reference');
+    // Reverse so the highest-z layer (drawn last) appears at the top of the panel.
     const drawingLayersTopDown = [...drawingLayers].reverse();
+
     const handleLayerDragStart = (layerId) => {
+        // Record which layer is being dragged so drop handlers know the source.
         setDraggedLayerId(layerId);
     };
 
-    const handleLayerDragOver = (layerId) => {
+    /**
+     * While a layer is being dragged over another layer item, compute which
+     * gap index to highlight based on whether the cursor is in the top or
+     * bottom half of the target item. This gives the user fine-grained control
+     * over insertion position without needing a separate gap-only drop zone.
+     */
+    const handleLayerDragOver = (layerId, e) => {
         if (!draggedLayerId || draggedLayerId === layerId) return;
+        const idx = drawingLayersTopDown.findIndex(l => l.id === layerId);
+        if (idx === -1) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const isTopHalf = e.clientY < rect.top + rect.height / 2;
+        setDragOverGapIndex(isTopHalf ? idx : idx + 1);
     };
 
     const handleGapDragOver = (gapIndex) => {
@@ -41,9 +74,23 @@ const LayersPanel = ({
         setDragOverGapIndex(gapIndex);
     };
 
-    const handleLayerDrop = () => {
+    const handleLayerDrop = (layerId, e) => {
+        // Prefer the gap index set by handleLayerDragOver so insertion is always
+        // precise. If no gap was hovered, just cancel the drag.
+        if (dragOverGapIndex !== null) {
+            handleGapDrop(dragOverGapIndex);
+        } else {
+            setDraggedLayerId(null);
+        }
     };
 
+    /**
+     * Resolve the drop gap index into source/target indices in the layers array
+     * and delegate to useLayerManager's reorderLayers.
+     *
+     * Gap 0 = above the topmost drawing layer (highest z-order).
+     * Gap N = below drawing layer at position N-1 in the top-down list.
+     */
     const handleGapDrop = (gapIndex) => {
         if (!draggedLayerId || drawingLayersTopDown.length === 0) {
             setDraggedLayerId(null);
@@ -55,10 +102,12 @@ const LayersPanel = ({
         let toIndex = -1;
 
         if (gapIndex === 0) {
+            // Insert above the current top layer.
             const topMost = drawingLayersTopDown[0];
             const topMostIndex = layers.findIndex((layer) => layer.id === topMost.id);
             toIndex = topMostIndex + 1;
         } else {
+            // Insert below the neighbor that sits above this gap.
             const upperNeighbor = drawingLayersTopDown[gapIndex - 1];
             toIndex = layers.findIndex((layer) => layer.id === upperNeighbor.id);
         }
@@ -72,6 +121,7 @@ const LayersPanel = ({
     };
 
     const handleLayerDragEnd = () => {
+        // Clean up drag state whether the drop succeeded or was cancelled.
         setDraggedLayerId(null);
         setDragOverGapIndex(null);
     };
@@ -195,6 +245,11 @@ const LayersPanel = ({
                                         onDelete={onDeleteLayer}
                                         onClothify={onClothify}
                                         onPatternMaker={onPatternMaker}
+                                        onMergeDown={onMergeDown}
+                                        canMergeDown={(() => {
+                                            const layerIdx = layers.findIndex(l => l.id === layer.id);
+                                            return layerIdx > 0 && layers[layerIdx - 1]?.type === 'drawing';
+                                        })()}
                                     />
                                 </React.Fragment>
                             );
@@ -232,6 +287,8 @@ const LayersPanel = ({
                                     onClothify={onClothify}
                                     onPatternMaker={onPatternMaker}
                                     onStylebend={onStylebendFromLayer}
+                                    onTextToClothes={onTextToClothes}
+                                    onExtractDoodle={onExtractDoodle}
                                 />
                             </div>
                         )}

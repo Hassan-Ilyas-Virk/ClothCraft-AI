@@ -1,7 +1,16 @@
+/**
+ * ClothCraftLogo — the brand logomark as an inline SVG.
+ *
+ * Renders the interlinked fabric-loop icon at an arbitrary size while
+ * preserving the original 578:395 aspect ratio. `color` is applied as
+ * SVG fill so the logo can be tinted to match any background (white for
+ * dark headers, purple for light backgrounds). A subtle drop-shadow filter
+ * is baked into the SVG definition.
+ */
 import React from 'react';
 
 const ClothCraftLogo = ({ size = 200, color = "white", className = "" }) => {
-  // We calculate height based on the original SVG aspect ratio (578/395)
+  // Height is derived from the original 578×395 viewBox aspect ratio.
   const height = (size * 395) / 578;
 
   return (

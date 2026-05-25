@@ -1,3 +1,22 @@
+/**
+ * Toolbar — vertical left-side tool palette.
+ *
+ * Renders the drawing tool buttons, undo/redo, live-preview toggle,
+ * the colour picker, and the moodboard palette swatches (when extracted).
+ *
+ * Tool groups (separated by dividers in the UI):
+ *   - Drawing: Brush, Eraser
+ *   - View:    Pan
+ *   - Selection: Select (marquee), Lasso (freehand)
+ *   - Shapes:  Rectangle, Circle, Text
+ *   - Other:   Transform, Zoom
+ *   - History: Undo, Redo
+ *   - AI:      Live Preview toggle
+ *   - Colour:  Moodboard extractor, colour picker, moodboard swatches
+ *
+ * The `disabled` prop is true while an AI pipeline is running (isProcessing)
+ * or when no layer is active, preventing tool switches that could corrupt state.
+ */
 import React from 'react';
 import {
     Paintbrush,
@@ -12,7 +31,8 @@ import {
     ZoomIn,
     Palette,
     Undo2,
-    Redo2
+    Redo2,
+    Zap,
 } from 'lucide-react';
 import './Toolbar.css';
 
@@ -28,7 +48,14 @@ const Toolbar = ({
     canUndo,
     canRedo,
     disabled,
+    liveMode,
+    onLiveModeToggle,
 }) => {
+    /**
+     * Tool definitions. The `hint` string is shown in the hint bar below the
+     * toolbar so users can discover keyboard shortcuts and interaction patterns.
+     * Dividers are rendered after index 2 (after Pan) and index 6 (after Text).
+     */
     const tools = [
         { id: 'brush',        icon: Paintbrush,          label: 'Brush',     hint: 'Drag to paint' },
         { id: 'eraser',       icon: Eraser,              label: 'Eraser',    hint: 'Drag to erase pixels' },
@@ -57,9 +84,11 @@ const Toolbar = ({
                             disabled={disabled}
                             title={tool.label}
                         >
-                            <IconComponent size={20} strokeWidth={2} />
+                            <IconComponent size={18} strokeWidth={2} />
                             <span className="toolbar-tool-tooltip">{tool.label}</span>
                         </button>
+                        {/* index 2 = after Pan (separates draw/view from selection)
+                            index 6 = after Text (separates shapes from transform/zoom) */}
                         {(index === 2 || index === 6) && <div className="toolbar-divider" />}
                     </React.Fragment>
                 );
@@ -73,7 +102,7 @@ const Toolbar = ({
                 disabled={disabled || !canUndo}
                 title="Undo (Ctrl/Cmd+Z)"
             >
-                <Undo2 size={20} strokeWidth={2} />
+                <Undo2 size={18} strokeWidth={2} />
                 <span className="toolbar-tool-tooltip">Undo</span>
             </button>
 
@@ -83,8 +112,19 @@ const Toolbar = ({
                 disabled={disabled || !canRedo}
                 title="Redo (Ctrl/Cmd+Shift+Z or Ctrl+Y)"
             >
-                <Redo2 size={20} strokeWidth={2} />
+                <Redo2 size={18} strokeWidth={2} />
                 <span className="toolbar-tool-tooltip">Redo</span>
+            </button>
+
+            <div className="toolbar-divider" />
+
+            <button
+                className={`toolbar-tool live-toggle-btn${liveMode ? ' live-active' : ''}`}
+                onClick={onLiveModeToggle}
+                title={liveMode ? 'Disable Live Preview' : 'Enable Live Pix2Pix Preview'}
+            >
+                <Zap size={18} strokeWidth={2} />
+                <span className="toolbar-tool-tooltip">{liveMode ? 'Live: ON' : 'Live Preview'}</span>
             </button>
 
             <div className="toolbar-color-section">
@@ -93,7 +133,7 @@ const Toolbar = ({
                     onClick={onOpenMoodboard}
                     title="Open Moodboard Color Extractor"
                 >
-                    <Palette size={18} strokeWidth={2} />
+                    <Palette size={16} strokeWidth={2} />
                 </div>
                 <div className="toolbar-color-picker" title="Color">
                     <input
